@@ -27,7 +27,7 @@ struct Args {
     endpoint: String,
 
     /// Graph Analytics Engine endpoint URL
-    #[arg(long)]
+    #[arg(long, default_value = "http://localhost:9999")]
     gae: Option<String>,
 
     /// Username for authentication
@@ -52,6 +52,50 @@ struct GaeVersion {
     api_max_version: u32,
     api_min_version: u32,
     version: String,
+}
+
+// GAE Graphs API structures
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct GaeGraph {
+    graph_id: u64,
+    number_of_vertices: u64,
+    number_of_edges: u64,
+    memory_usage: u64,
+    memory_per_vertex: u64,
+    memory_per_edge: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GaeListGraphsResponse {
+    error_code: i32,
+    error_message: String,
+    graphs: Vec<GaeGraph>,
+}
+
+// GAE Jobs API structures
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct GaeJob {
+    job_id: u64,
+    graph_id: u64,
+    total: u32,
+    progress: u32,
+    error: bool,
+    error_code: i32,
+    error_message: String,
+    comp_type: String,
+    memory_usage: u64,
+    runtime_in_microseconds: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GaeListJobsResponse {
+    error_code: i32,
+    error_message: String,
+    jobs: Vec<GaeJob>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -283,6 +327,60 @@ async fn check_gae_version(client: &Client, endpoint: &str) -> Result<GaeVersion
         .context("Failed to parse GAE version response")?;
 
     Ok(version)
+}
+
+async fn get_gae_graphs(client: &Client, endpoint: &str) -> Result<Vec<GaeGraph>> {
+    let url = format!("{}/v1/graphs", endpoint.trim_end_matches('/'));
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .context("Failed to fetch GAE graphs")?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("Failed to fetch GAE graphs: {}", response.status());
+    }
+
+    // Get the response text for debugging
+    let response_text = response
+        .text()
+        .await
+        .context("Failed to read GAE graphs response")?;
+
+    eprintln!("DEBUG: GAE graphs response: {}", response_text);
+
+    // The API returns a plain array of graphs
+    let graphs: Vec<GaeGraph> =
+        serde_json::from_str(&response_text).context("Failed to parse GAE graphs response")?;
+
+    Ok(graphs)
+}
+
+async fn get_gae_jobs(client: &Client, endpoint: &str) -> Result<Vec<GaeJob>> {
+    let url = format!("{}/v1/jobs", endpoint.trim_end_matches('/'));
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .context("Failed to fetch GAE jobs")?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("Failed to fetch GAE jobs: {}", response.status());
+    }
+
+    // Get the response text for debugging
+    let response_text = response
+        .text()
+        .await
+        .context("Failed to read GAE jobs response")?;
+
+    eprintln!("DEBUG: GAE jobs response: {}", response_text);
+
+    // The API returns a plain array of jobs
+    let jobs: Vec<GaeJob> =
+        serde_json::from_str(&response_text).context("Failed to parse GAE jobs response")?;
+
+    Ok(jobs)
 }
 
 async fn get_databases(
@@ -588,6 +686,12 @@ enum BrowserView {
     AqlQueryResults(String),              // database name
 }
 
+#[derive(Clone, Debug)]
+enum GaeView {
+    Graphs,
+    Jobs,
+}
+
 enum InputState {
     None,
     EnteringDocumentCount(String), // Current input string
@@ -633,6 +737,76 @@ struct AqlState {
     current_page: usize,
     scroll_offset: usize,
     is_fetching: bool,
+}
+
+struct GaeBrowser {
+    view: GaeView,
+    graphs: Vec<GaeGraph>,
+    selected_graph_index: usize,
+    jobs: Vec<GaeJob>,
+    selected_job_index: usize,
+    accessible: bool,
+    error_message: Option<String>,
+}
+
+impl GaeBrowser {
+    fn new() -> Self {
+        Self {
+            view: GaeView::Graphs,
+            graphs: Vec::new(),
+            selected_graph_index: 0,
+            jobs: Vec::new(),
+            selected_job_index: 0,
+            accessible: true,
+            error_message: None,
+        }
+    }
+
+    async fn load_graphs(&mut self, app_state: &AppState) -> Result<()> {
+        if let Some(ref gae_endpoint) = app_state.gae_endpoint {
+            match get_gae_graphs(&app_state.http_client, gae_endpoint).await {
+                Ok(graphs) => {
+                    self.graphs = graphs;
+                    self.selected_graph_index = 0;
+                    self.accessible = true;
+                    self.error_message = None;
+                    Ok(())
+                }
+                Err(e) => {
+                    self.accessible = false;
+                    self.error_message = Some(format!("Failed to fetch graphs: {}", e));
+                    Err(e)
+                }
+            }
+        } else {
+            self.accessible = false;
+            self.error_message = Some("GAE endpoint not configured".to_string());
+            anyhow::bail!("GAE endpoint not configured")
+        }
+    }
+
+    async fn load_jobs(&mut self, app_state: &AppState) -> Result<()> {
+        if let Some(ref gae_endpoint) = app_state.gae_endpoint {
+            match get_gae_jobs(&app_state.http_client, gae_endpoint).await {
+                Ok(jobs) => {
+                    self.jobs = jobs;
+                    self.selected_job_index = 0;
+                    self.accessible = true;
+                    self.error_message = None;
+                    Ok(())
+                }
+                Err(e) => {
+                    self.accessible = false;
+                    self.error_message = Some(format!("Failed to fetch jobs: {}", e));
+                    Err(e)
+                }
+            }
+        } else {
+            self.accessible = false;
+            self.error_message = Some("GAE endpoint not configured".to_string());
+            anyhow::bail!("GAE endpoint not configured")
+        }
+    }
 }
 
 struct DatabaseBrowser {
@@ -1582,6 +1756,216 @@ fn render_aql_query_results(f: &mut Frame, area: Rect, browser: &DatabaseBrowser
     }
 }
 
+fn render_gae_graphs(f: &mut Frame, area: Rect, browser: &GaeBrowser) {
+    use ratatui::widgets::{Cell, Row, Table};
+
+    if !browser.accessible {
+        let error_msg = browser
+            .error_message
+            .as_deref()
+            .unwrap_or("GAE not accessible");
+        let no_access = Paragraph::new(error_msg)
+            .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL).title("GAE - Graphs"));
+        f.render_widget(no_access, area);
+        return;
+    }
+
+    if browser.graphs.is_empty() {
+        let empty = Paragraph::new("No graphs loaded in GAE")
+            .style(Style::default().fg(Color::Yellow))
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("GAE - Graphs | J: Jobs | R: Refresh | Q/ESC: Back"),
+            );
+        f.render_widget(empty, area);
+        return;
+    }
+
+    let title = format!(
+        "GAE - Graphs ({} graphs) | J: Jobs | R: Refresh | Q/ESC: Back",
+        browser.graphs.len()
+    );
+
+    let header = Row::new(vec![
+        "Graph ID",
+        "Vertices",
+        "Edges",
+        "Memory (MB)",
+        "Mem/Vertex (B)",
+        "Mem/Edge (B)",
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )
+    .bottom_margin(1);
+
+    let rows: Vec<Row> = browser
+        .graphs
+        .iter()
+        .enumerate()
+        .map(|(i, graph)| {
+            let style = if i == browser.selected_graph_index {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            let memory_mb = graph.memory_usage as f64 / (1024.0 * 1024.0);
+
+            Row::new(vec![
+                Cell::from(graph.graph_id.to_string()),
+                Cell::from(graph.number_of_vertices.to_string()),
+                Cell::from(graph.number_of_edges.to_string()),
+                Cell::from(format!("{:.2}", memory_mb)),
+                Cell::from(graph.memory_per_vertex.to_string()),
+                Cell::from(graph.memory_per_edge.to_string()),
+            ])
+            .style(style)
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Percentage(15),
+        Constraint::Percentage(15),
+        Constraint::Percentage(15),
+        Constraint::Percentage(20),
+        Constraint::Percentage(17),
+        Constraint::Percentage(18),
+    ];
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .column_spacing(2);
+
+    f.render_widget(table, area);
+}
+
+fn render_gae_jobs(f: &mut Frame, area: Rect, browser: &GaeBrowser) {
+    use ratatui::widgets::{Cell, Row, Table};
+
+    if !browser.accessible {
+        let error_msg = browser
+            .error_message
+            .as_deref()
+            .unwrap_or("GAE not accessible");
+        let no_access = Paragraph::new(error_msg)
+            .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL).title("GAE - Jobs"));
+        f.render_widget(no_access, area);
+        return;
+    }
+
+    if browser.jobs.is_empty() {
+        let empty = Paragraph::new("No jobs in GAE")
+            .style(Style::default().fg(Color::Yellow))
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("GAE - Jobs | G: Graphs | R: Refresh | Q/ESC: Back"),
+            );
+        f.render_widget(empty, area);
+        return;
+    }
+
+    let title = format!(
+        "GAE - Jobs ({} jobs) | G: Graphs | R: Refresh | Q/ESC: Back",
+        browser.jobs.len()
+    );
+
+    let header = Row::new(vec![
+        "Job ID",
+        "Graph ID",
+        "Type",
+        "Progress",
+        "Status",
+        "Memory (MB)",
+        "Runtime (ms)",
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )
+    .bottom_margin(1);
+
+    let rows: Vec<Row> = browser
+        .jobs
+        .iter()
+        .enumerate()
+        .map(|(i, job)| {
+            let style = if i == browser.selected_job_index {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else if job.error {
+                Style::default().fg(Color::Red)
+            } else if job.progress == job.total && job.total > 0 {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            let progress_str = if job.total > 0 {
+                format!("{}/{}", job.progress, job.total)
+            } else {
+                "N/A".to_string()
+            };
+
+            let status_str = if job.error {
+                format!("Error: {}", job.error_message)
+            } else if job.progress == job.total && job.total > 0 {
+                "Completed".to_string()
+            } else {
+                "Running".to_string()
+            };
+
+            let memory_mb = job.memory_usage as f64 / (1024.0 * 1024.0);
+            let runtime_ms = job.runtime_in_microseconds as f64 / 1000.0;
+
+            Row::new(vec![
+                Cell::from(job.job_id.to_string()),
+                Cell::from(job.graph_id.to_string()),
+                Cell::from(job.comp_type.clone()),
+                Cell::from(progress_str),
+                Cell::from(status_str),
+                Cell::from(format!("{:.2}", memory_mb)),
+                Cell::from(format!("{:.2}", runtime_ms)),
+            ])
+            .style(style)
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Percentage(10),
+        Constraint::Percentage(10),
+        Constraint::Percentage(15),
+        Constraint::Percentage(12),
+        Constraint::Percentage(25),
+        Constraint::Percentage(13),
+        Constraint::Percentage(15),
+    ];
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .column_spacing(2);
+
+    f.render_widget(table, area);
+}
+
 async fn run_database_browser(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app_state: &AppState,
@@ -2316,6 +2700,97 @@ async fn run_database_browser(
     }
 }
 
+async fn run_gae_browser(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app_state: &AppState,
+) -> Result<()> {
+    let mut browser = GaeBrowser::new();
+
+    // Try to load initial data based on current view
+    match browser.view {
+        GaeView::Graphs => {
+            let _ = browser.load_graphs(app_state).await;
+        }
+        GaeView::Jobs => {
+            let _ = browser.load_jobs(app_state).await;
+        }
+    }
+
+    loop {
+        terminal.draw(|f| match browser.view {
+            GaeView::Graphs => render_gae_graphs(f, f.area(), &browser),
+            GaeView::Jobs => render_gae_jobs(f, f.area(), &browser),
+        })?;
+
+        if let Event::Key(key) = event::read()? {
+            if key.kind == KeyEventKind::Press {
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                    KeyCode::Char('g') | KeyCode::Char('G') => {
+                        if !matches!(browser.view, GaeView::Graphs) {
+                            browser.view = GaeView::Graphs;
+                            let _ = browser.load_graphs(app_state).await;
+                        }
+                    }
+                    KeyCode::Char('j') | KeyCode::Char('J') => {
+                        if !matches!(browser.view, GaeView::Jobs) {
+                            browser.view = GaeView::Jobs;
+                            let _ = browser.load_jobs(app_state).await;
+                        }
+                    }
+                    KeyCode::Char('r') | KeyCode::Char('R') => {
+                        // Refresh current view
+                        match browser.view {
+                            GaeView::Graphs => {
+                                let _ = browser.load_graphs(app_state).await;
+                            }
+                            GaeView::Jobs => {
+                                let _ = browser.load_jobs(app_state).await;
+                            }
+                        }
+                    }
+                    KeyCode::Down => match browser.view {
+                        GaeView::Graphs => {
+                            if !browser.graphs.is_empty() {
+                                browser.selected_graph_index =
+                                    (browser.selected_graph_index + 1) % browser.graphs.len();
+                            }
+                        }
+                        GaeView::Jobs => {
+                            if !browser.jobs.is_empty() {
+                                browser.selected_job_index =
+                                    (browser.selected_job_index + 1) % browser.jobs.len();
+                            }
+                        }
+                    },
+                    KeyCode::Up => match browser.view {
+                        GaeView::Graphs => {
+                            if !browser.graphs.is_empty() {
+                                browser.selected_graph_index = if browser.selected_graph_index == 0
+                                {
+                                    browser.graphs.len() - 1
+                                } else {
+                                    browser.selected_graph_index - 1
+                                };
+                            }
+                        }
+                        GaeView::Jobs => {
+                            if !browser.jobs.is_empty() {
+                                browser.selected_job_index = if browser.selected_job_index == 0 {
+                                    browser.jobs.len() - 1
+                                } else {
+                                    browser.selected_job_index - 1
+                                };
+                            }
+                        }
+                    },
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 fn render_main_menu(f: &mut Frame, app_state: &mut AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2445,7 +2920,7 @@ async fn app_loop(
                                     run_database_browser(terminal, app_state).await?;
                                 }
                                 MenuItem::Gae => {
-                                    // TODO: Implement
+                                    run_gae_browser(terminal, app_state).await?;
                                 }
                                 MenuItem::Options => {
                                     // TODO: Implement
