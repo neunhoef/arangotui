@@ -25,7 +25,7 @@ ArangoTUI is an interactive command-line tool that provides a modern, keyboard-d
 ### Building from Source
 
 ```bash
-git clone https://github.com/yourusername/arangotui.git
+git clone https://github.com/neunhoef/arangotui.git
 cd arangotui
 cargo build --release
 ```
@@ -101,6 +101,27 @@ arangotui --endpoint http://localhost:8529 --gae http://localhost:9000
 - **PageUp/PageDown**: Scroll faster
 - **q** or **Esc**: Return to collection list
 
+### Collection Content View
+
+- **Arrow Keys** or **j/k**: Navigate through documents
+- **PageUp/PageDown**: Scroll faster through document list
+- **Enter**: View full document details
+- **q** or **Esc**: Return to collection list
+
+### AQL Query Execution
+
+- **Type**: Enter your AQL query
+- **Ctrl+Enter** or **F5**: Execute query
+- **Arrow Keys** or **j/k**: Navigate through results
+- **Tab**: Switch between query input and results view
+- **q** or **Esc**: Return to main menu
+
+### Graphs Overview
+
+- **Arrow Keys** or **j/k**: Navigate through available graphs
+- **Enter**: View graph details and properties
+- **q** or **Esc**: Return to main menu
+
 ## Features
 
 ### Database Browser
@@ -126,6 +147,42 @@ View detailed information about collections, including:
   - Schema definitions
   - Key options
   - And more...
+
+### Collection Content View
+
+Browse and view documents within a collection:
+
+- Display documents in a paginated list
+- View full document content in formatted JSON
+- Navigate through large collections efficiently
+- Quick access to document keys and metadata
+- Real-time document count information
+
+### AQL Query Interface
+
+Execute AQL (ArangoDB Query Language) queries directly from the TUI:
+
+- Interactive query editor with syntax input
+- Execute queries against the connected database
+- View query results in formatted JSON
+- Navigate through result sets
+- Error reporting for invalid queries
+- Support for read and write queries
+- Query history (planned)
+
+### Graphs Overview
+
+Explore graph structures defined in your ArangoDB instance:
+
+- List all named graphs in the database
+- View graph definitions and properties
+- Display edge collections and vertex collections
+- Inspect graph configuration including:
+  - Edge definitions
+  - Orphan collections
+  - Smart graph settings
+  - Satellite collections
+- Navigate graph metadata
 
 ### Graph Analytics Engine (GAE)
 
@@ -178,15 +235,18 @@ cargo test
 - [x] Database browsing interface
 - [x] Collection listing and statistics
 - [x] Collection properties viewer
+- [x] Collection content viewer
+- [x] AQL query interface
+- [x] Graphs overview
 - [ ] GAE integration
-- [ ] Document browser and viewer
-- [ ] AQL query interface
+- [ ] Advanced document editing
 - [ ] Index management
 - [ ] User and permission management
 - [ ] Graph visualization
+- [ ] Query history and saved queries
 - [ ] Configuration file support
 - [ ] Export functionality
-- [ ] Search and filtering
+- [ ] Search and filtering within collections
 
 ## Contributing
 
@@ -194,7 +254,21 @@ Contributions are welcome! Please feel free to submit issues or pull requests.
 
 ## License
 
-[License information to be added]
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+
+Copyright 2025 ArangoTUI Contributors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 
 ## Acknowledgments
 
