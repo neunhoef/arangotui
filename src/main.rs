@@ -16,6 +16,7 @@ use ratatui::{
 use reqwest::Client;
 use serde::Deserialize;
 use std::io;
+use tui_textarea::TextArea;
 
 #[derive(Parser, Debug)]
 #[command(name = "arangotui")]
@@ -164,6 +165,17 @@ struct AqlQueryResponse {
     has_more: bool,
     cached: bool,
     extra: Option<serde_json::Value>,
+    id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AqlCursorNextResponse {
+    error: bool,
+    code: u16,
+    result: Vec<serde_json::Value>,
+    #[serde(rename = "hasMore")]
+    has_more: bool,
+    id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -437,6 +449,92 @@ async fn execute_aql_query(
     Ok(query_response.result)
 }
 
+async fn execute_aql_query_with_params(
+    client: &Client,
+    endpoint: &str,
+    database: &str,
+    query: &str,
+    bind_vars: Option<serde_json::Value>,
+    batch_size: usize,
+    stream: bool,
+    username: &str,
+    password: &str,
+) -> Result<AqlQueryResponse> {
+    let url = format!(
+        "{}/_db/{}/_api/cursor",
+        endpoint.trim_end_matches('/'),
+        database
+    );
+
+    let mut body = serde_json::json!({
+        "query": query,
+        "count": false,
+        "batchSize": batch_size,
+        "options": {
+            "stream": stream
+        }
+    });
+
+    if let Some(vars) = bind_vars {
+        body["bindVars"] = vars;
+    }
+
+    let response = client
+        .post(&url)
+        .basic_auth(username, Some(password))
+        .json(&body)
+        .send()
+        .await
+        .context("Failed to execute AQL query")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_default();
+        anyhow::bail!("Failed to execute AQL query: {} - {}", status, error_text);
+    }
+
+    let query_response: AqlQueryResponse = response
+        .json()
+        .await
+        .context("Failed to parse AQL query response")?;
+
+    Ok(query_response)
+}
+
+async fn fetch_cursor_next(
+    client: &Client,
+    endpoint: &str,
+    database: &str,
+    cursor_id: &str,
+    username: &str,
+    password: &str,
+) -> Result<AqlCursorNextResponse> {
+    let url = format!(
+        "{}/_db/{}/_api/cursor/{}",
+        endpoint.trim_end_matches('/'),
+        database,
+        cursor_id
+    );
+
+    let response = client
+        .put(&url)
+        .basic_auth(username, Some(password))
+        .send()
+        .await
+        .context("Failed to fetch cursor")?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("Failed to fetch cursor: {}", response.status());
+    }
+
+    let cursor_response: AqlCursorNextResponse = response
+        .json()
+        .await
+        .context("Failed to parse cursor response")?;
+
+    Ok(cursor_response)
+}
+
 async fn get_database_stats(
     client: &Client,
     endpoint: &str,
@@ -486,11 +584,55 @@ enum BrowserView {
     CollectionProperties(String, String), // database name, collection name
     DocumentViewer(String, String),       // database name, collection name
     GraphProperties(String, String),      // database name, graph name
+    AqlQueryInput(String),                // database name
+    AqlQueryResults(String),              // database name
 }
 
 enum InputState {
     None,
     EnteringDocumentCount(String), // Current input string
+}
+
+#[derive(Clone, Debug)]
+enum AqlInputField {
+    Query,
+    Parameters,
+    Options,
+    Submit,
+}
+
+#[derive(Clone, Debug)]
+struct AqlQueryOptions {
+    batch_size: usize,
+    stream: bool,
+    max_documents: usize,
+}
+
+impl Default for AqlQueryOptions {
+    fn default() -> Self {
+        Self {
+            batch_size: 1000,
+            stream: true,
+            max_documents: 100000,
+        }
+    }
+}
+
+struct AqlState {
+    query_textarea: TextArea<'static>,
+    parameters_textarea: TextArea<'static>,
+    options_textarea: TextArea<'static>,
+    active_field: AqlInputField,
+    parameters_valid: bool,
+    options_valid: bool,
+    // Results state
+    results: Vec<serde_json::Value>,
+    total_fetched: usize,
+    has_more: bool,
+    cursor_id: Option<String>,
+    current_page: usize,
+    scroll_offset: usize,
+    is_fetching: bool,
 }
 
 struct DatabaseBrowser {
@@ -508,6 +650,7 @@ struct DatabaseBrowser {
     documents: Vec<serde_json::Value>,
     navigation_stack: Vec<(BrowserView, usize)>, // Stack to track navigation history (view, selected_index)
     graph_details: Option<GraphInfo>,
+    aql_state: Option<AqlState>,
 }
 
 impl DatabaseBrowser {
@@ -527,7 +670,43 @@ impl DatabaseBrowser {
             documents: Vec::new(),
             navigation_stack: Vec::new(),
             graph_details: None,
+            aql_state: None,
         }
+    }
+
+    fn init_aql_state(&mut self) {
+        let default_options = AqlQueryOptions::default();
+        let options_json = serde_json::json!({
+            "batchSize": default_options.batch_size,
+            "stream": default_options.stream,
+            "maxDocuments": default_options.max_documents,
+        });
+
+        let query_textarea = TextArea::default();
+        let parameters_textarea = TextArea::from(["{}".to_string()]);
+        let options_textarea = TextArea::from(
+            serde_json::to_string_pretty(&options_json)
+                .unwrap_or_default()
+                .lines()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+        );
+
+        self.aql_state = Some(AqlState {
+            query_textarea,
+            parameters_textarea,
+            options_textarea,
+            active_field: AqlInputField::Query,
+            parameters_valid: true,
+            options_valid: true,
+            results: Vec::new(),
+            total_fetched: 0,
+            has_more: false,
+            cursor_id: None,
+            current_page: 0,
+            scroll_offset: 0,
+            is_fetching: false,
+        });
     }
 
     async fn load_databases(&mut self, app_state: &AppState) -> Result<()> {
@@ -794,7 +973,7 @@ fn render_collection_list(f: &mut Frame, area: Rect, browser: &DatabaseBrowser, 
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(format!("Database: {} | Press G for Graphs", database)),
+                    .title(format!("Database: {} | G: Graphs | A: AQL Query", database)),
             );
         f.render_widget(empty, area);
         return;
@@ -804,7 +983,7 @@ fn render_collection_list(f: &mut Frame, area: Rect, browser: &DatabaseBrowser, 
     let total_docs: u64 = browser.collections.iter().filter_map(|c| c.count).sum();
 
     let title = format!(
-        "Database: {} | Collections: {} | Total Documents: {} | Press G for Graphs | SPACE to view documents",
+        "Database: {} | Collections: {} | Total Documents: {} | G: Graphs | A: AQL Query | SPACE: view documents",
         database, total_collections, total_docs
     );
 
@@ -875,11 +1054,10 @@ fn render_graph_list(f: &mut Frame, area: Rect, browser: &DatabaseBrowser, datab
         let empty = Paragraph::new("No graphs found")
             .style(Style::default().fg(Color::Yellow))
             .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!("Database: {} | Press C for Collections", database)),
-            );
+            .block(Block::default().borders(Borders::ALL).title(format!(
+                "Database: {} | C: Collections | A: AQL Query",
+                database
+            )));
         f.render_widget(empty, area);
         return;
     }
@@ -891,20 +1069,20 @@ fn render_graph_list(f: &mut Frame, area: Rect, browser: &DatabaseBrowser, datab
         if edge_idx.is_some() {
             // On edge definition row
             format!(
-                "Database: {} | Graphs: {} | C: Collections | ENTER: Edge collection | V: Vertex collection",
+                "Database: {} | Graphs: {} | C: Collections | A: AQL Query | ENTER: Edge collection | V: Vertex collection",
                 database, total_graphs
             )
         } else {
             // On graph row
             format!(
-                "Database: {} | Graphs: {} | C: Collections | ENTER: Graph details (JSON)",
+                "Database: {} | Graphs: {} | C: Collections | A: AQL Query | ENTER: Graph details (JSON)",
                 database, total_graphs
             )
         }
     } else {
         // Fallback
         format!(
-            "Database: {} | Graphs: {} | C: Collections",
+            "Database: {} | Graphs: {} | C: Collections | A: AQL Query",
             database, total_graphs
         )
     };
@@ -1181,6 +1359,229 @@ fn render_graph_properties(
     }
 }
 
+fn render_aql_query_input(
+    f: &mut Frame,
+    area: Rect,
+    browser: &mut DatabaseBrowser,
+    database: &str,
+) {
+    if let Some(aql_state) = &mut browser.aql_state {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(35), // Query input
+                Constraint::Percentage(25), // Parameters input
+                Constraint::Percentage(25), // Options input
+                Constraint::Length(3),      // Submit button
+            ])
+            .split(area);
+
+        // Query textarea
+        aql_state.query_textarea.set_block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("AQL Query (TAB to switch fields)")
+                .border_style(if matches!(aql_state.active_field, AqlInputField::Query) {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default()
+                }),
+        );
+        aql_state
+            .query_textarea
+            .set_cursor_line_style(Style::default());
+        aql_state
+            .query_textarea
+            .set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
+        f.render_widget(&aql_state.query_textarea, chunks[0]);
+
+        // Parameters textarea
+        let validation_msg = if aql_state.parameters_valid {
+            "✓ Valid JSON"
+        } else {
+            "✗ Invalid JSON"
+        };
+
+        aql_state.parameters_textarea.set_block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Query Parameters (JSON) - {}", validation_msg))
+                .border_style(
+                    if matches!(aql_state.active_field, AqlInputField::Parameters) {
+                        Style::default().fg(Color::Cyan)
+                    } else if aql_state.parameters_valid {
+                        Style::default()
+                    } else {
+                        Style::default().fg(Color::Red)
+                    },
+                ),
+        );
+        aql_state
+            .parameters_textarea
+            .set_cursor_line_style(Style::default());
+        aql_state
+            .parameters_textarea
+            .set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
+        f.render_widget(&aql_state.parameters_textarea, chunks[1]);
+
+        // Options textarea
+        let options_validation_msg = if aql_state.options_valid {
+            "✓ Valid JSON"
+        } else {
+            "✗ Invalid JSON"
+        };
+
+        aql_state.options_textarea.set_block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Query Options (JSON) - {}", options_validation_msg))
+                .border_style(
+                    if matches!(aql_state.active_field, AqlInputField::Options) {
+                        Style::default().fg(Color::Cyan)
+                    } else if aql_state.options_valid {
+                        Style::default()
+                    } else {
+                        Style::default().fg(Color::Red)
+                    },
+                ),
+        );
+        aql_state
+            .options_textarea
+            .set_cursor_line_style(Style::default());
+        aql_state
+            .options_textarea
+            .set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
+        f.render_widget(&aql_state.options_textarea, chunks[2]);
+
+        // Submit button
+        let submit_text = if matches!(aql_state.active_field, AqlInputField::Submit) {
+            ">>> [ SUBMIT QUERY - Press ENTER ] <<<"
+        } else {
+            "[ SUBMIT QUERY - Press TAB then ENTER ]"
+        };
+
+        let submit_widget = Paragraph::new(submit_text)
+            .style(if matches!(aql_state.active_field, AqlInputField::Submit) {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Green)
+            })
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL));
+        f.render_widget(submit_widget, chunks[3]);
+    } else {
+        let error = Paragraph::new("AQL state not initialized")
+            .style(Style::default().fg(Color::Red))
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("AQL Query - {}", database)),
+            );
+        f.render_widget(error, area);
+    }
+}
+
+fn render_aql_query_results(f: &mut Frame, area: Rect, browser: &DatabaseBrowser, database: &str) {
+    if let Some(aql_state) = &browser.aql_state {
+        if aql_state.is_fetching {
+            // Show progress bar
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3), // Progress info
+                    Constraint::Min(0),    // Progress bar area
+                ])
+                .split(area);
+
+            let progress_text = format!("Fetching documents: {} fetched", aql_state.total_fetched);
+            let progress_para = Paragraph::new(progress_text)
+                .style(Style::default().fg(Color::Yellow))
+                .alignment(Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!("AQL Query Results - {}", database)),
+                );
+            f.render_widget(progress_para, chunks[0]);
+
+            // Simple progress indicator
+            let progress_indicator = Paragraph::new("Loading...")
+                .style(Style::default().fg(Color::Cyan))
+                .alignment(Alignment::Center);
+            f.render_widget(progress_indicator, chunks[1]);
+        } else if aql_state.results.is_empty() {
+            let empty = Paragraph::new("No results")
+                .style(Style::default().fg(Color::Yellow))
+                .alignment(Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!("AQL Query Results - {}", database)),
+                );
+            f.render_widget(empty, area);
+        } else {
+            // Display results with pagination
+            let page_size = 100; // ~100 lines per page, but complete documents
+
+            // Calculate which documents to show
+            let mut lines_in_page = Vec::new();
+            let mut current_line_count = 0;
+            let start_doc_idx = aql_state.current_page * page_size;
+            let mut docs_in_page = 0;
+
+            for (idx, doc) in aql_state.results.iter().enumerate().skip(start_doc_idx) {
+                if current_line_count >= page_size && docs_in_page > 0 {
+                    break;
+                }
+
+                if idx > start_doc_idx {
+                    lines_in_page.push(Line::from(""));
+                    current_line_count += 1;
+                }
+
+                let json_str =
+                    serde_json::to_string_pretty(doc).unwrap_or_else(|_| "Error".to_string());
+                for line in json_str.lines() {
+                    lines_in_page.push(Line::from(line.to_string()));
+                    current_line_count += 1;
+                }
+                docs_in_page += 1;
+            }
+
+            let total_pages = (aql_state.results.len() + page_size - 1) / page_size;
+
+            let title = format!(
+                "AQL Query Results - {} | Page {}/{} | {} docs | ← → : pages | ↑ ↓ PgUp PgDn: scroll | Q/ESC: back",
+                database,
+                aql_state.current_page + 1,
+                total_pages.max(1),
+                aql_state.results.len()
+            );
+
+            let para = Paragraph::new(lines_in_page)
+                .style(Style::default().fg(Color::White))
+                .block(Block::default().borders(Borders::ALL).title(title))
+                .scroll((aql_state.scroll_offset as u16, 0));
+
+            f.render_widget(para, area);
+        }
+    } else {
+        let error = Paragraph::new("AQL state not initialized")
+            .style(Style::default().fg(Color::Red))
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("AQL Query Results - {}", database)),
+            );
+        f.render_widget(error, area);
+    }
+}
+
 async fn run_database_browser(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app_state: &AppState,
@@ -1190,7 +1591,7 @@ async fn run_database_browser(
 
     loop {
         terminal.draw(|f| {
-            match &browser.view {
+            match &browser.view.clone() {
                 BrowserView::DatabaseList => render_database_list(f, f.area(), &browser),
                 BrowserView::CollectionList(db) => {
                     render_collection_list(f, f.area(), &browser, db)
@@ -1204,6 +1605,12 @@ async fn run_database_browser(
                 }
                 BrowserView::GraphProperties(db, graph) => {
                     render_graph_properties(f, f.area(), &browser, db, graph)
+                }
+                BrowserView::AqlQueryInput(db) => {
+                    render_aql_query_input(f, f.area(), &mut browser, db)
+                }
+                BrowserView::AqlQueryResults(db) => {
+                    render_aql_query_results(f, f.area(), &browser, db)
                 }
             }
 
@@ -1308,6 +1715,13 @@ async fn run_database_browser(
                             browser.load_graphs(app_state, &db).await?;
                             browser.view = BrowserView::GraphList(db.clone());
                         }
+                        KeyCode::Char('a') | KeyCode::Char('A') => {
+                            // Open AQL query view (initialize state only if needed)
+                            if browser.aql_state.is_none() {
+                                browser.init_aql_state();
+                            }
+                            browser.view = BrowserView::AqlQueryInput(db.clone());
+                        }
                         KeyCode::Char(' ') => {
                             // Open input dialog for document count
                             browser.input_state =
@@ -1350,6 +1764,13 @@ async fn run_database_browser(
                         }
                         KeyCode::Char('c') | KeyCode::Char('C') => {
                             browser.view = BrowserView::CollectionList(db.clone());
+                        }
+                        KeyCode::Char('a') | KeyCode::Char('A') => {
+                            // Open AQL query view (initialize state only if needed)
+                            if browser.aql_state.is_none() {
+                                browser.init_aql_state();
+                            }
+                            browser.view = BrowserView::AqlQueryInput(db.clone());
                         }
                         KeyCode::Enter => {
                             // Determine what was selected
@@ -1513,6 +1934,382 @@ async fn run_database_browser(
                         }
                         _ => {}
                     },
+                    BrowserView::AqlQueryInput(db) => {
+                        // Handle AQL input view keys
+                        use crossterm::event::KeyModifiers;
+
+                        if let Some(aql_state) = &mut browser.aql_state {
+                            // Check for Ctrl+Enter first (before other key handling)
+                            if key.code == KeyCode::Enter
+                                && key.modifiers.contains(KeyModifiers::CONTROL)
+                            {
+                                // Execute query
+                                if aql_state.parameters_valid && aql_state.options_valid {
+                                    let query_text = aql_state.query_textarea.lines().join("\n");
+                                    let params_text =
+                                        aql_state.parameters_textarea.lines().join("\n");
+                                    let options_text =
+                                        aql_state.options_textarea.lines().join("\n");
+
+                                    // Parse parameters
+                                    let bind_vars = if params_text.trim() == "{}" {
+                                        None
+                                    } else {
+                                        serde_json::from_str(&params_text).ok()
+                                    };
+
+                                    // Parse options
+                                    let options: Result<serde_json::Value, _> =
+                                        serde_json::from_str(&options_text);
+
+                                    if let Ok(opts) = options {
+                                        let batch_size =
+                                            opts["batchSize"].as_u64().unwrap_or(1000) as usize;
+                                        let stream = opts["stream"].as_bool().unwrap_or(true);
+                                        let max_documents =
+                                            opts["maxDocuments"].as_u64().unwrap_or(100000)
+                                                as usize;
+
+                                        // Execute query
+                                        aql_state.is_fetching = true;
+                                        aql_state.results.clear();
+                                        aql_state.total_fetched = 0;
+                                        aql_state.has_more = false;
+                                        aql_state.cursor_id = None;
+
+                                        browser.view = BrowserView::AqlQueryResults(db.clone());
+
+                                        // Start fetching - first batch
+                                        match execute_aql_query_with_params(
+                                            &app_state.http_client,
+                                            &app_state.arango_endpoint,
+                                            &db,
+                                            &query_text,
+                                            bind_vars.clone(),
+                                            batch_size,
+                                            stream,
+                                            &app_state.username,
+                                            &app_state.password,
+                                        )
+                                        .await
+                                        {
+                                            Ok(response) => {
+                                                // Store initial results
+                                                let mut all_results = response.result;
+                                                let mut has_more = response.has_more;
+                                                let mut cursor_id = response.id;
+
+                                                // Continue fetching if there's more
+                                                while has_more && all_results.len() < max_documents
+                                                {
+                                                    if let Some(ref cursor) = cursor_id {
+                                                        match fetch_cursor_next(
+                                                            &app_state.http_client,
+                                                            &app_state.arango_endpoint,
+                                                            &db,
+                                                            cursor,
+                                                            &app_state.username,
+                                                            &app_state.password,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(cursor_response) => {
+                                                                all_results
+                                                                    .extend(cursor_response.result);
+                                                                has_more = cursor_response.has_more;
+                                                                cursor_id = cursor_response.id;
+                                                            }
+                                                            Err(_) => {
+                                                                break;
+                                                            }
+                                                        }
+                                                    } else {
+                                                        break;
+                                                    }
+                                                }
+
+                                                // Update state once with all results
+                                                if let Some(aql_state) = browser.aql_state.as_mut()
+                                                {
+                                                    aql_state.results = all_results;
+                                                    aql_state.total_fetched =
+                                                        aql_state.results.len();
+                                                    aql_state.has_more = has_more;
+                                                    aql_state.cursor_id = cursor_id;
+                                                    aql_state.is_fetching = false;
+                                                }
+                                            }
+                                            Err(_e) => {
+                                                // Query failed - go back to input
+                                                browser.view =
+                                                    BrowserView::AqlQueryInput(db.clone());
+                                                if let Some(aql_state) = &mut browser.aql_state {
+                                                    aql_state.is_fetching = false;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Handle other keys
+                                match key.code {
+                                    KeyCode::Char('q') | KeyCode::Esc => {
+                                        // Return to collection list but keep AQL state
+                                        browser.view = BrowserView::CollectionList(db.clone());
+                                    }
+                                    KeyCode::Tab => {
+                                        // Switch between fields including Submit button
+                                        aql_state.active_field = match aql_state.active_field {
+                                            AqlInputField::Query => AqlInputField::Parameters,
+                                            AqlInputField::Parameters => AqlInputField::Options,
+                                            AqlInputField::Options => AqlInputField::Submit,
+                                            AqlInputField::Submit => AqlInputField::Query,
+                                        };
+                                    }
+                                    KeyCode::Enter => {
+                                        // Check if we're on the Submit button
+                                        if matches!(aql_state.active_field, AqlInputField::Submit) {
+                                            // Execute query when Enter is pressed on Submit button
+                                            if aql_state.parameters_valid && aql_state.options_valid
+                                            {
+                                                let query_text =
+                                                    aql_state.query_textarea.lines().join("\n");
+                                                let params_text = aql_state
+                                                    .parameters_textarea
+                                                    .lines()
+                                                    .join("\n");
+                                                let options_text =
+                                                    aql_state.options_textarea.lines().join("\n");
+
+                                                // Parse parameters
+                                                let bind_vars = if params_text.trim() == "{}" {
+                                                    None
+                                                } else {
+                                                    serde_json::from_str(&params_text).ok()
+                                                };
+
+                                                // Parse options
+                                                let options: Result<serde_json::Value, _> =
+                                                    serde_json::from_str(&options_text);
+
+                                                if let Ok(opts) = options {
+                                                    let batch_size =
+                                                        opts["batchSize"].as_u64().unwrap_or(1000)
+                                                            as usize;
+                                                    let stream =
+                                                        opts["stream"].as_bool().unwrap_or(true);
+                                                    let max_documents = opts["maxDocuments"]
+                                                        .as_u64()
+                                                        .unwrap_or(100000)
+                                                        as usize;
+
+                                                    // Execute query (same logic as before)
+                                                    aql_state.is_fetching = true;
+                                                    aql_state.results.clear();
+                                                    aql_state.total_fetched = 0;
+                                                    aql_state.has_more = false;
+                                                    aql_state.cursor_id = None;
+
+                                                    browser.view =
+                                                        BrowserView::AqlQueryResults(db.clone());
+
+                                                    // Start fetching
+                                                    match execute_aql_query_with_params(
+                                                        &app_state.http_client,
+                                                        &app_state.arango_endpoint,
+                                                        &db,
+                                                        &query_text,
+                                                        bind_vars.clone(),
+                                                        batch_size,
+                                                        stream,
+                                                        &app_state.username,
+                                                        &app_state.password,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(response) => {
+                                                            let mut all_results = response.result;
+                                                            let mut has_more = response.has_more;
+                                                            let mut cursor_id = response.id;
+
+                                                            while has_more
+                                                                && all_results.len() < max_documents
+                                                            {
+                                                                if let Some(ref cursor) = cursor_id
+                                                                {
+                                                                    match fetch_cursor_next(
+                                                                        &app_state.http_client,
+                                                                        &app_state.arango_endpoint,
+                                                                        &db,
+                                                                        cursor,
+                                                                        &app_state.username,
+                                                                        &app_state.password,
+                                                                    )
+                                                                    .await
+                                                                    {
+                                                                        Ok(cursor_response) => {
+                                                                            all_results.extend(
+                                                                                cursor_response
+                                                                                    .result,
+                                                                            );
+                                                                            has_more =
+                                                                                cursor_response
+                                                                                    .has_more;
+                                                                            cursor_id =
+                                                                                cursor_response.id;
+                                                                        }
+                                                                        Err(_) => {
+                                                                            break;
+                                                                        }
+                                                                    }
+                                                                } else {
+                                                                    break;
+                                                                }
+                                                            }
+
+                                                            if let Some(aql_state) =
+                                                                browser.aql_state.as_mut()
+                                                            {
+                                                                aql_state.results = all_results;
+                                                                aql_state.total_fetched =
+                                                                    aql_state.results.len();
+                                                                aql_state.has_more = has_more;
+                                                                aql_state.cursor_id = cursor_id;
+                                                                aql_state.is_fetching = false;
+                                                            }
+                                                        }
+                                                        Err(_e) => {
+                                                            browser.view =
+                                                                BrowserView::AqlQueryInput(
+                                                                    db.clone(),
+                                                                );
+                                                            if let Some(aql_state) =
+                                                                &mut browser.aql_state
+                                                            {
+                                                                aql_state.is_fetching = false;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            // Pass Enter to the active TextArea for newline
+                                            match aql_state.active_field {
+                                                AqlInputField::Query => {
+                                                    aql_state.query_textarea.input(key);
+                                                }
+                                                AqlInputField::Parameters => {
+                                                    aql_state.parameters_textarea.input(key);
+                                                    let text = aql_state
+                                                        .parameters_textarea
+                                                        .lines()
+                                                        .join("\n");
+                                                    aql_state.parameters_valid =
+                                                        serde_json::from_str::<serde_json::Value>(
+                                                            &text,
+                                                        )
+                                                        .is_ok();
+                                                }
+                                                AqlInputField::Options => {
+                                                    aql_state.options_textarea.input(key);
+                                                    let text = aql_state
+                                                        .options_textarea
+                                                        .lines()
+                                                        .join("\n");
+                                                    aql_state.options_valid =
+                                                        serde_json::from_str::<serde_json::Value>(
+                                                            &text,
+                                                        )
+                                                        .is_ok();
+                                                }
+                                                AqlInputField::Submit => {
+                                                    // No input on submit button
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        // Pass all other keys to the active TextArea
+                                        match aql_state.active_field {
+                                            AqlInputField::Query => {
+                                                aql_state.query_textarea.input(key);
+                                            }
+                                            AqlInputField::Parameters => {
+                                                aql_state.parameters_textarea.input(key);
+                                                // Validate JSON after input
+                                                let text = aql_state
+                                                    .parameters_textarea
+                                                    .lines()
+                                                    .join("\n");
+                                                aql_state.parameters_valid =
+                                                    serde_json::from_str::<serde_json::Value>(
+                                                        &text,
+                                                    )
+                                                    .is_ok();
+                                            }
+                                            AqlInputField::Options => {
+                                                aql_state.options_textarea.input(key);
+                                                // Validate JSON after input
+                                                let text =
+                                                    aql_state.options_textarea.lines().join("\n");
+                                                aql_state.options_valid =
+                                                    serde_json::from_str::<serde_json::Value>(
+                                                        &text,
+                                                    )
+                                                    .is_ok();
+                                            }
+                                            AqlInputField::Submit => {
+                                                // No input on submit button
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    BrowserView::AqlQueryResults(db) => {
+                        if let Some(aql_state) = &mut browser.aql_state {
+                            match key.code {
+                                KeyCode::Char('q') | KeyCode::Esc => {
+                                    browser.view = BrowserView::AqlQueryInput(db.clone());
+                                    aql_state.scroll_offset = 0;
+                                    aql_state.current_page = 0;
+                                }
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    aql_state.scroll_offset =
+                                        aql_state.scroll_offset.saturating_add(1);
+                                }
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    aql_state.scroll_offset =
+                                        aql_state.scroll_offset.saturating_sub(1);
+                                }
+                                KeyCode::PageDown => {
+                                    aql_state.scroll_offset =
+                                        aql_state.scroll_offset.saturating_add(10);
+                                }
+                                KeyCode::PageUp => {
+                                    aql_state.scroll_offset =
+                                        aql_state.scroll_offset.saturating_sub(10);
+                                }
+                                KeyCode::Left => {
+                                    if aql_state.current_page > 0 {
+                                        aql_state.current_page -= 1;
+                                        aql_state.scroll_offset = 0;
+                                    }
+                                }
+                                KeyCode::Right => {
+                                    let page_size = 100;
+                                    let total_pages =
+                                        (aql_state.results.len() + page_size - 1) / page_size;
+                                    if aql_state.current_page + 1 < total_pages {
+                                        aql_state.current_page += 1;
+                                        aql_state.scroll_offset = 0;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                 }
             }
         }
