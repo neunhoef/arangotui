@@ -56,7 +56,6 @@ struct GaeVersion {
 
 // GAE Graphs API structures
 #[derive(Debug, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
 struct GaeGraph {
     graph_id: u64,
     number_of_vertices: u64,
@@ -67,7 +66,6 @@ struct GaeGraph {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct GaeListGraphsResponse {
     error_code: i32,
     error_message: String,
@@ -76,7 +74,6 @@ struct GaeListGraphsResponse {
 
 // GAE Jobs API structures
 #[derive(Debug, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
 struct GaeJob {
     job_id: u64,
     graph_id: u64,
@@ -91,7 +88,6 @@ struct GaeJob {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct GaeListJobsResponse {
     error_code: i32,
     error_message: String,
@@ -183,11 +179,8 @@ struct GraphInfo {
     edge_definitions: Vec<EdgeDefinition>,
     orphan_collections: Vec<String>,
     name: String,
-    #[serde(rename = "isSmart")]
     is_smart: Option<bool>,
-    #[serde(rename = "isDisjoint")]
     is_disjoint: Option<bool>,
-    #[serde(rename = "smartGraphAttribute")]
     smart_graph_attribute: Option<String>,
     number_of_shards: Option<u32>,
     replication_factor: Option<serde_json::Value>,
@@ -347,13 +340,12 @@ async fn get_gae_graphs(client: &Client, endpoint: &str) -> Result<Vec<GaeGraph>
         .await
         .context("Failed to read GAE graphs response")?;
 
-    eprintln!("DEBUG: GAE graphs response: {}", response_text);
-
     // The API returns a plain array of graphs
-    let graphs: Vec<GaeGraph> =
-        serde_json::from_str(&response_text).context("Failed to parse GAE graphs response")?;
-
-    Ok(graphs)
+    let graphs = serde_json::from_str(&response_text);
+    if let Err(err) = graphs {
+        anyhow::bail!("Failed to parse GAE graphs response: {}", err);
+    }
+    Ok(graphs.unwrap())
 }
 
 async fn get_gae_jobs(client: &Client, endpoint: &str) -> Result<Vec<GaeJob>> {
@@ -374,13 +366,12 @@ async fn get_gae_jobs(client: &Client, endpoint: &str) -> Result<Vec<GaeJob>> {
         .await
         .context("Failed to read GAE jobs response")?;
 
-    eprintln!("DEBUG: GAE jobs response: {}", response_text);
-
     // The API returns a plain array of jobs
-    let jobs: Vec<GaeJob> =
-        serde_json::from_str(&response_text).context("Failed to parse GAE jobs response")?;
-
-    Ok(jobs)
+    let jobs = serde_json::from_str(&response_text);
+    if let Err(err) = jobs {
+        anyhow::bail!("Failed to parse GAE jobs response: {}", err);
+    }
+    Ok(jobs.unwrap())
 }
 
 async fn get_databases(
