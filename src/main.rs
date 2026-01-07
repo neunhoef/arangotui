@@ -48,6 +48,8 @@ struct ArangoVersion {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+// Note that for whatever reason we use camel case here and for backwards compatibility
+// reasons we cannot change this any more.
 struct GaeVersion {
     api_max_version: u32,
     api_min_version: u32,
@@ -294,12 +296,16 @@ async fn check_arango_version(
         anyhow::bail!("ArangoDB returned error status: {}", response.status());
     }
 
-    let version: ArangoVersion = response
-        .json()
+    let response_text = response
+        .text()
         .await
-        .context("Failed to parse ArangoDB version response")?;
+        .context("Failed to read ArangoDB version response")?;
 
-    Ok(version)
+    let version = serde_json::from_str(&response_text);
+    if let Err(err) = version {
+        anyhow::bail!("Failed to parse ArangoDB version response: {}", err);
+    }
+    Ok(version.unwrap())
 }
 
 async fn check_gae_version(client: &Client, endpoint: &str) -> Result<GaeVersion> {
@@ -314,12 +320,16 @@ async fn check_gae_version(client: &Client, endpoint: &str) -> Result<GaeVersion
         anyhow::bail!("GAE returned error status: {}", response.status());
     }
 
-    let version: GaeVersion = response
-        .json()
+    let response_text = response
+        .text()
         .await
-        .context("Failed to parse GAE version response")?;
+        .context("Failed to read GAE version response")?;
 
-    Ok(version)
+    let version = serde_json::from_str(&response_text);
+    if let Err(err) = version {
+        anyhow::bail!("Failed to parse GAE version response: {}", err);
+    }
+    Ok(version.unwrap())
 }
 
 async fn get_gae_graphs(client: &Client, endpoint: &str) -> Result<Vec<GaeGraph>> {
@@ -392,10 +402,16 @@ async fn get_databases(
         anyhow::bail!("Failed to fetch databases: {}", response.status());
     }
 
-    let db_response: DatabaseListResponse = response
-        .json()
+    let response_text = response
+        .text()
         .await
-        .context("Failed to parse database list response")?;
+        .context("Failed to read database list response")?;
+
+    let db_response = serde_json::from_str(&response_text);
+    if let Err(err) = db_response {
+        anyhow::bail!("Failed to parse database list response: {}", err);
+    }
+    let db_response: DatabaseListResponse = db_response.unwrap();
 
     Ok(db_response.result)
 }
@@ -423,10 +439,16 @@ async fn get_collections(
         anyhow::bail!("Failed to fetch collections: {}", response.status());
     }
 
-    let coll_response: CollectionListResponse = response
-        .json()
+    let response_text = response
+        .text()
         .await
-        .context("Failed to parse collection list response")?;
+        .context("Failed to read collection list response")?;
+
+    let coll_response = serde_json::from_str(&response_text);
+    if let Err(err) = coll_response {
+        anyhow::bail!("Failed to parse collection list response: {}", err);
+    }
+    let coll_response: CollectionListResponse = coll_response.unwrap();
 
     Ok(coll_response.result)
 }
@@ -456,12 +478,16 @@ async fn get_collection_count(
         anyhow::bail!("Failed to fetch collection count: {}", response.status());
     }
 
-    let count_response: CollectionCount = response
-        .json()
+    let response_text = response
+        .text()
         .await
-        .context("Failed to parse collection count response")?;
+        .context("Failed to read collection count response")?;
 
-    Ok(count_response)
+    let count_response = serde_json::from_str(&response_text);
+    if let Err(err) = count_response {
+        anyhow::bail!("Failed to parse collection count response: {}", err);
+    }
+    Ok(count_response.unwrap())
 }
 
 async fn get_graphs(
@@ -487,10 +513,16 @@ async fn get_graphs(
         anyhow::bail!("Failed to fetch graphs: {}", response.status());
     }
 
-    let graph_response: GraphListResponse = response
-        .json()
+    let response_text = response
+        .text()
         .await
-        .context("Failed to parse graph list response")?;
+        .context("Failed to read graph list response")?;
+
+    let graph_response = serde_json::from_str(&response_text);
+    if let Err(err) = graph_response {
+        anyhow::bail!("Failed to parse graph list response: {}", err);
+    }
+    let graph_response: GraphListResponse = graph_response.unwrap();
 
     Ok(graph_response.graphs)
 }
@@ -530,10 +562,16 @@ async fn execute_aql_query(
         anyhow::bail!("Failed to execute AQL query: {}", response.status());
     }
 
-    let query_response: AqlQueryResponse = response
-        .json()
+    let response_text = response
+        .text()
         .await
-        .context("Failed to parse AQL query response")?;
+        .context("Failed to read AQL query response")?;
+
+    let query_response = serde_json::from_str(&response_text);
+    if let Err(err) = query_response {
+        anyhow::bail!("Failed to parse AQL query response: {}", err);
+    }
+    let query_response: AqlQueryResponse = query_response.unwrap();
 
     Ok(query_response.result)
 }
@@ -582,12 +620,16 @@ async fn execute_aql_query_with_params(
         anyhow::bail!("Failed to execute AQL query: {} - {}", status, error_text);
     }
 
-    let query_response: AqlQueryResponse = response
-        .json()
+    let response_text = response
+        .text()
         .await
-        .context("Failed to parse AQL query response")?;
+        .context("Failed to read AQL query response")?;
 
-    Ok(query_response)
+    let query_response = serde_json::from_str(&response_text);
+    if let Err(err) = query_response {
+        anyhow::bail!("Failed to parse AQL query response: {}", err);
+    }
+    Ok(query_response.unwrap())
 }
 
 async fn fetch_cursor_next(
@@ -616,12 +658,16 @@ async fn fetch_cursor_next(
         anyhow::bail!("Failed to fetch cursor: {}", response.status());
     }
 
-    let cursor_response: AqlCursorNextResponse = response
-        .json()
+    let response_text = response
+        .text()
         .await
-        .context("Failed to parse cursor response")?;
+        .context("Failed to read cursor response")?;
 
-    Ok(cursor_response)
+    let cursor_response = serde_json::from_str(&response_text);
+    if let Err(err) = cursor_response {
+        anyhow::bail!("Failed to parse cursor response: {}", err);
+    }
+    Ok(cursor_response.unwrap())
 }
 
 async fn get_database_stats(
