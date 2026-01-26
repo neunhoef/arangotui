@@ -5,6 +5,9 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use hmac::{Hmac, Mac};
+use jwt::header::HeaderType;
+use jwt::{AlgorithmType, Header, SignWithKey, Token};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -14,7 +17,8 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::io;
 use tui_textarea::TextArea;
 
@@ -37,6 +41,10 @@ struct Args {
     /// Password for authentication
     #[arg(long, default_value = "")]
     password: String,
+
+    /// GAE JWT secret file for authentication
+    #[arg(long)]
+    gae_jwt_secret_file: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -232,6 +240,11 @@ struct CollectionWithCount {
     count: Option<u64>,
 }
 
+struct GaeJwtToken {
+    token: String,
+    expiry: std::time::SystemTime,
+}
+
 struct AppState {
     arango_endpoint: String,
     gae_endpoint: Option<String>,
@@ -241,6 +254,8 @@ struct AppState {
     gae_version: Option<GaeVersion>,
     selected_menu_item: usize,
     http_client: Client,
+    gae_jwt_secret: Option<Vec<u8>>,
+    gae_jwt_token: Option<GaeJwtToken>,
 }
 
 enum MenuItem {
@@ -308,13 +323,19 @@ async fn check_arango_version(
     Ok(version.unwrap())
 }
 
-async fn check_gae_version(client: &Client, endpoint: &str) -> Result<GaeVersion> {
+async fn check_gae_version(
+    client: &Client,
+    endpoint: &str,
+    token: Option<&str>,
+) -> Result<GaeVersion> {
     let url = format!("{}/v1/version", endpoint.trim_end_matches('/'));
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .context("Failed to connect to GAE")?;
+    let mut request = client.get(&url);
+
+    if let Some(jwt_token) = token {
+        request = request.bearer_auth(jwt_token);
+    }
+
+    let response = request.send().await.context("Failed to connect to GAE")?;
 
     if !response.status().is_success() {
         anyhow::bail!("GAE returned error status: {}", response.status());
@@ -332,13 +353,19 @@ async fn check_gae_version(client: &Client, endpoint: &str) -> Result<GaeVersion
     Ok(version.unwrap())
 }
 
-async fn get_gae_graphs(client: &Client, endpoint: &str) -> Result<Vec<GaeGraph>> {
+async fn get_gae_graphs(
+    client: &Client,
+    endpoint: &str,
+    token: Option<&str>,
+) -> Result<Vec<GaeGraph>> {
     let url = format!("{}/v1/graphs", endpoint.trim_end_matches('/'));
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .context("Failed to fetch GAE graphs")?;
+    let mut request = client.get(&url);
+
+    if let Some(jwt_token) = token {
+        request = request.bearer_auth(jwt_token);
+    }
+
+    let response = request.send().await.context("Failed to fetch GAE graphs")?;
 
     if !response.status().is_success() {
         anyhow::bail!("Failed to fetch GAE graphs: {}", response.status());
@@ -358,13 +385,15 @@ async fn get_gae_graphs(client: &Client, endpoint: &str) -> Result<Vec<GaeGraph>
     Ok(graphs.unwrap())
 }
 
-async fn get_gae_jobs(client: &Client, endpoint: &str) -> Result<Vec<GaeJob>> {
+async fn get_gae_jobs(client: &Client, endpoint: &str, token: Option<&str>) -> Result<Vec<GaeJob>> {
     let url = format!("{}/v1/jobs", endpoint.trim_end_matches('/'));
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .context("Failed to fetch GAE jobs")?;
+    let mut request = client.get(&url);
+
+    if let Some(jwt_token) = token {
+        request = request.bearer_auth(jwt_token);
+    }
+
+    let response = request.send().await.context("Failed to fetch GAE jobs")?;
 
     if !response.status().is_success() {
         anyhow::bail!("Failed to fetch GAE jobs: {}", response.status());
@@ -382,6 +411,72 @@ async fn get_gae_jobs(client: &Client, endpoint: &str) -> Result<Vec<GaeJob>> {
         anyhow::bail!("Failed to parse GAE jobs response: {}", err);
     }
     Ok(jobs.unwrap())
+}
+
+// JWT Claims structure for GAE tokens
+#[derive(Debug, Serialize, Deserialize)]
+struct GaeJwtClaims {
+    iss: String,
+    exp: u64,
+}
+
+// Generate a JWT token for GAE authentication
+fn create_gae_jwt_token(secret: &[u8], expiry_in_seconds: u64) -> Result<String> {
+    let key: Hmac<Sha256> =
+        Hmac::new_from_slice(secret).context("Failed to create HMAC key from secret")?;
+
+    let exp = (std::time::SystemTime::now() + std::time::Duration::from_secs(expiry_in_seconds))
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("System time error")?
+        .as_secs();
+
+    let header = Header {
+        algorithm: AlgorithmType::Hs256,
+        type_: Some(HeaderType::JsonWebToken),
+        ..Default::default()
+    };
+
+    let claims = GaeJwtClaims {
+        iss: "arangotui".to_string(),
+        exp,
+    };
+
+    let token = Token::new(header, claims)
+        .sign_with_key(&key)
+        .context("Failed to sign JWT token")?;
+
+    Ok(token.as_str().to_string())
+}
+
+// Check if token needs refresh (less than 30min until expiry)
+fn needs_token_refresh(token: &Option<GaeJwtToken>) -> bool {
+    match token {
+        None => true,
+        Some(t) => {
+            let now = std::time::SystemTime::now();
+            let threshold = std::time::Duration::from_secs(30 * 60); // 30 minutes
+
+            match t.expiry.duration_since(now) {
+                Ok(remaining) => remaining < threshold,
+                Err(_) => true, // Token already expired
+            }
+        }
+    }
+}
+
+// Refresh the GAE JWT token if needed
+fn ensure_gae_token(app_state: &mut AppState) -> Result<()> {
+    if let Some(ref secret) = app_state.gae_jwt_secret {
+        if needs_token_refresh(&app_state.gae_jwt_token) {
+            let expiry_seconds = 3600; // 1 hour
+            let token = create_gae_jwt_token(secret, expiry_seconds)?;
+            let expiry =
+                std::time::SystemTime::now() + std::time::Duration::from_secs(expiry_seconds);
+
+            app_state.gae_jwt_token = Some(GaeJwtToken { token, expiry });
+        }
+    }
+    Ok(())
 }
 
 async fn get_databases(
@@ -837,7 +932,8 @@ impl GaeBrowser {
 
     async fn load_graphs(&mut self, app_state: &AppState) -> Result<()> {
         if let Some(ref gae_endpoint) = app_state.gae_endpoint {
-            match get_gae_graphs(&app_state.http_client, gae_endpoint).await {
+            let token = app_state.gae_jwt_token.as_ref().map(|t| t.token.as_str());
+            match get_gae_graphs(&app_state.http_client, gae_endpoint, token).await {
                 Ok(graphs) => {
                     self.graphs = graphs;
                     self.selected_graph_index = 0;
@@ -860,7 +956,8 @@ impl GaeBrowser {
 
     async fn load_jobs(&mut self, app_state: &AppState) -> Result<()> {
         if let Some(ref gae_endpoint) = app_state.gae_endpoint {
-            match get_gae_jobs(&app_state.http_client, gae_endpoint).await {
+            let token = app_state.gae_jwt_token.as_ref().map(|t| t.token.as_str());
+            match get_gae_jobs(&app_state.http_client, gae_endpoint, token).await {
                 Ok(jobs) => {
                     self.jobs = jobs;
                     self.selected_job_index = 0;
@@ -2851,16 +2948,18 @@ async fn run_database_browser(
 
 async fn run_gae_browser(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app_state: &AppState,
+    app_state: &mut AppState,
 ) -> Result<()> {
     let mut browser = GaeBrowser::new();
 
     // Try to load initial data based on current view
     match browser.view {
         GaeView::Graphs => {
+            let _ = ensure_gae_token(app_state);
             let _ = browser.load_graphs(app_state).await;
         }
         GaeView::Jobs => {
+            let _ = ensure_gae_token(app_state);
             let _ = browser.load_jobs(app_state).await;
         }
         GaeView::LoadGraphInput => {}
@@ -2906,25 +3005,36 @@ async fn run_gae_browser(
                                                 )
                                             {
                                                 // Call the GAE API to load the graph
-                                                if let Some(ref gae_endpoint) =
-                                                    app_state.gae_endpoint
+                                                if let Some(gae_endpoint) =
+                                                    app_state.gae_endpoint.clone()
                                                 {
+                                                    let _ = ensure_gae_token(app_state);
+
                                                     let url = format!(
                                                         "{}/v1/loaddata",
                                                         gae_endpoint.trim_end_matches('/')
                                                     );
 
-                                                    let response = app_state
+                                                    let token = app_state
+                                                        .gae_jwt_token
+                                                        .as_ref()
+                                                        .map(|t| t.token.as_str());
+                                                    let mut request = app_state
                                                         .http_client
                                                         .post(&url)
-                                                        .json(&config)
-                                                        .send()
-                                                        .await;
+                                                        .json(&config);
+
+                                                    if let Some(jwt_token) = token {
+                                                        request = request.bearer_auth(jwt_token);
+                                                    }
+
+                                                    let response = request.send().await;
 
                                                     match response {
                                                         Ok(resp) if resp.status().is_success() => {
                                                             // Successfully created the job, switch to jobs view
                                                             browser.view = GaeView::Jobs;
+                                                            let _ = ensure_gae_token(app_state);
                                                             let _ =
                                                                 browser.load_jobs(app_state).await;
                                                             browser.load_graph_state = None;
@@ -2981,12 +3091,14 @@ async fn run_gae_browser(
                             KeyCode::Char('g') | KeyCode::Char('G') => {
                                 if !matches!(browser.view, GaeView::Graphs) {
                                     browser.view = GaeView::Graphs;
+                                    let _ = ensure_gae_token(app_state);
                                     let _ = browser.load_graphs(app_state).await;
                                 }
                             }
                             KeyCode::Char('j') | KeyCode::Char('J') => {
                                 if !matches!(browser.view, GaeView::Jobs) {
                                     browser.view = GaeView::Jobs;
+                                    let _ = ensure_gae_token(app_state);
                                     let _ = browser.load_jobs(app_state).await;
                                 }
                             }
@@ -3001,9 +3113,11 @@ async fn run_gae_browser(
                                 // Refresh current view
                                 match browser.view {
                                     GaeView::Graphs => {
+                                        let _ = ensure_gae_token(app_state);
                                         let _ = browser.load_graphs(app_state).await;
                                     }
                                     GaeView::Jobs => {
+                                        let _ = ensure_gae_token(app_state);
                                         let _ = browser.load_jobs(app_state).await;
                                     }
                                     GaeView::LoadGraphInput => {}
@@ -3217,10 +3331,43 @@ async fn main() -> Result<()> {
         arango_version.version, arango_version.license
     );
 
+    // Load GAE JWT secret if provided
+    let gae_jwt_secret = if let Some(ref secret_file) = args.gae_jwt_secret_file {
+        match std::fs::read(secret_file) {
+            Ok(secret) => {
+                println!("Loaded GAE JWT secret from {}", secret_file);
+                Some(secret)
+            }
+            Err(e) => {
+                eprintln!("Warning: Could not read GAE JWT secret file: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Generate initial GAE JWT token if secret is available
+    let gae_jwt_token = if let Some(ref secret) = gae_jwt_secret {
+        match create_gae_jwt_token(secret, 3600) {
+            Ok(token) => {
+                let expiry = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+                Some(GaeJwtToken { token, expiry })
+            }
+            Err(e) => {
+                eprintln!("Warning: Could not create GAE JWT token: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Check GAE version (optional)
     let gae_version = if let Some(gae_endpoint) = &args.gae {
         println!("Connecting to GAE at {}...", gae_endpoint);
-        match check_gae_version(&client, gae_endpoint).await {
+        let token = gae_jwt_token.as_ref().map(|t| t.token.as_str());
+        match check_gae_version(&client, gae_endpoint, token).await {
             Ok(version) => {
                 println!("Connected to GAE {}", version.version);
                 Some(version)
@@ -3244,6 +3391,8 @@ async fn main() -> Result<()> {
         gae_version,
         selected_menu_item: 0,
         http_client: client,
+        gae_jwt_secret,
+        gae_jwt_token,
     };
 
     // Run the TUI
