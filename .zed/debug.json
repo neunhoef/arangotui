@@ -1,0 +1,19 @@
+// Project-local debug tasks
+//
+// For more documentation on how to configure debug tasks,
+// see: https://zed.dev/docs/debugger
+[
+  {
+    "label": "Build & Debug main Rust binary",
+    "build": {
+      "command": "cargo",
+      "args": ["build"],
+    },
+    // sourceLanguages is required for CodeLLDB (not GDB) when using Rust
+    "program": "target/debug/arangotui",
+    "args": ["--endpoint", "http://localhost:8530"],
+    "sourceLanguages": ["rust"],
+    "request": "launch",
+    "adapter": "CodeLLDB",
+  },
+]
