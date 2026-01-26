@@ -2972,199 +2972,227 @@ async fn run_gae_browser(
             GaeView::LoadGraphInput => render_gae_load_graph(f, f.area(), &mut browser),
         })?;
 
-        if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press {
-                match browser.view {
-                    GaeView::LoadGraphInput => {
-                        // Handle load graph input view
-                        if let Some(load_state) = &mut browser.load_graph_state {
-                            match key.code {
-                                KeyCode::Char('q') | KeyCode::Esc => {
-                                    // Go back to graphs view
-                                    browser.view = GaeView::Graphs;
-                                    browser.load_graph_state = None;
-                                }
-                                KeyCode::Tab => {
-                                    // Switch between fields
-                                    load_state.active_field = match load_state.active_field {
-                                        LoadGraphField::JsonInput => LoadGraphField::Submit,
-                                        LoadGraphField::Submit => LoadGraphField::JsonInput,
-                                    };
-                                }
-                                KeyCode::Enter => {
-                                    // Check if we're on the Submit button
-                                    if matches!(load_state.active_field, LoadGraphField::Submit) {
-                                        // Submit the load graph request
-                                        if load_state.json_valid {
-                                            let json_text = load_state.textarea.lines().join("\n");
+        // Poll for events with a timeout of 1 second
+        // This allows auto-refresh while still being responsive to user input
+        if event::poll(std::time::Duration::from_millis(1000))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    match browser.view {
+                        GaeView::LoadGraphInput => {
+                            // Handle load graph input view
+                            if let Some(load_state) = &mut browser.load_graph_state {
+                                match key.code {
+                                    KeyCode::Char('q') | KeyCode::Esc => {
+                                        // Go back to graphs view
+                                        browser.view = GaeView::Graphs;
+                                        browser.load_graph_state = None;
+                                    }
+                                    KeyCode::Tab => {
+                                        // Switch between fields
+                                        load_state.active_field = match load_state.active_field {
+                                            LoadGraphField::JsonInput => LoadGraphField::Submit,
+                                            LoadGraphField::Submit => LoadGraphField::JsonInput,
+                                        };
+                                    }
+                                    KeyCode::Enter => {
+                                        // Check if we're on the Submit button
+                                        if matches!(load_state.active_field, LoadGraphField::Submit)
+                                        {
+                                            // Submit the load graph request
+                                            if load_state.json_valid {
+                                                let json_text =
+                                                    load_state.textarea.lines().join("\n");
 
-                                            // Parse the JSON
-                                            if let Ok(config) =
-                                                serde_json::from_str::<serde_json::Value>(
-                                                    &json_text,
-                                                )
-                                            {
-                                                // Call the GAE API to load the graph
-                                                if let Some(gae_endpoint) =
-                                                    app_state.gae_endpoint.clone()
+                                                // Parse the JSON
+                                                if let Ok(config) =
+                                                    serde_json::from_str::<serde_json::Value>(
+                                                        &json_text,
+                                                    )
                                                 {
-                                                    let _ = ensure_gae_token(app_state);
+                                                    // Call the GAE API to load the graph
+                                                    if let Some(gae_endpoint) =
+                                                        app_state.gae_endpoint.clone()
+                                                    {
+                                                        let _ = ensure_gae_token(app_state);
 
-                                                    let url = format!(
-                                                        "{}/v1/loaddata",
-                                                        gae_endpoint.trim_end_matches('/')
-                                                    );
+                                                        let url = format!(
+                                                            "{}/v1/loaddata",
+                                                            gae_endpoint.trim_end_matches('/')
+                                                        );
 
-                                                    let token = app_state
-                                                        .gae_jwt_token
-                                                        .as_ref()
-                                                        .map(|t| t.token.as_str());
-                                                    let mut request = app_state
-                                                        .http_client
-                                                        .post(&url)
-                                                        .json(&config);
+                                                        let token = app_state
+                                                            .gae_jwt_token
+                                                            .as_ref()
+                                                            .map(|t| t.token.as_str());
+                                                        let mut request = app_state
+                                                            .http_client
+                                                            .post(&url)
+                                                            .json(&config);
 
-                                                    if let Some(jwt_token) = token {
-                                                        request = request.bearer_auth(jwt_token);
-                                                    }
-
-                                                    let response = request.send().await;
-
-                                                    match response {
-                                                        Ok(resp) if resp.status().is_success() => {
-                                                            // Successfully created the job, switch to jobs view
-                                                            browser.view = GaeView::Jobs;
-                                                            let _ = ensure_gae_token(app_state);
-                                                            let _ =
-                                                                browser.load_jobs(app_state).await;
-                                                            browser.load_graph_state = None;
+                                                        if let Some(jwt_token) = token {
+                                                            request =
+                                                                request.bearer_auth(jwt_token);
                                                         }
-                                                        Ok(resp) => {
-                                                            // Error response - stay in load view
-                                                            eprintln!(
-                                                                "Failed to load graph: {}",
-                                                                resp.status()
-                                                            );
-                                                        }
-                                                        Err(e) => {
-                                                            // Network error - stay in load view
-                                                            eprintln!(
-                                                                "Failed to load graph: {}",
-                                                                e
-                                                            );
+
+                                                        let response = request.send().await;
+
+                                                        match response {
+                                                            Ok(resp)
+                                                                if resp.status().is_success() =>
+                                                            {
+                                                                // Successfully created the job, switch to jobs view
+                                                                browser.view = GaeView::Jobs;
+                                                                let _ = ensure_gae_token(app_state);
+                                                                let _ = browser
+                                                                    .load_jobs(app_state)
+                                                                    .await;
+                                                                browser.load_graph_state = None;
+                                                            }
+                                                            Ok(resp) => {
+                                                                // Error response - stay in load view
+                                                                eprintln!(
+                                                                    "Failed to load graph: {}",
+                                                                    resp.status()
+                                                                );
+                                                            }
+                                                            Err(e) => {
+                                                                // Network error - stay in load view
+                                                                eprintln!(
+                                                                    "Failed to load graph: {}",
+                                                                    e
+                                                                );
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
+                                        } else {
+                                            // Pass Enter to the textarea for newline
+                                            load_state.textarea.input(key);
+
+                                            // Validate JSON after input
+                                            let text = load_state.textarea.lines().join("\n");
+                                            load_state.json_valid =
+                                                serde_json::from_str::<serde_json::Value>(&text)
+                                                    .is_ok();
                                         }
-                                    } else {
-                                        // Pass Enter to the textarea for newline
-                                        load_state.textarea.input(key);
-
-                                        // Validate JSON after input
-                                        let text = load_state.textarea.lines().join("\n");
-                                        load_state.json_valid =
-                                            serde_json::from_str::<serde_json::Value>(&text)
-                                                .is_ok();
                                     }
-                                }
-                                _ => {
-                                    // Pass other keys to the textarea only if we're in JsonInput field
-                                    if matches!(load_state.active_field, LoadGraphField::JsonInput)
-                                    {
-                                        load_state.textarea.input(key);
+                                    _ => {
+                                        // Pass other keys to the textarea only if we're in JsonInput field
+                                        if matches!(
+                                            load_state.active_field,
+                                            LoadGraphField::JsonInput
+                                        ) {
+                                            load_state.textarea.input(key);
 
-                                        // Validate JSON after input
-                                        let text = load_state.textarea.lines().join("\n");
-                                        load_state.json_valid =
-                                            serde_json::from_str::<serde_json::Value>(&text)
-                                                .is_ok();
+                                            // Validate JSON after input
+                                            let text = load_state.textarea.lines().join("\n");
+                                            load_state.json_valid =
+                                                serde_json::from_str::<serde_json::Value>(&text)
+                                                    .is_ok();
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    _ => {
-                        // Handle other views
-                        match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                            KeyCode::Char('g') | KeyCode::Char('G') => {
-                                if !matches!(browser.view, GaeView::Graphs) {
-                                    browser.view = GaeView::Graphs;
-                                    let _ = ensure_gae_token(app_state);
-                                    let _ = browser.load_graphs(app_state).await;
-                                }
-                            }
-                            KeyCode::Char('j') | KeyCode::Char('J') => {
-                                if !matches!(browser.view, GaeView::Jobs) {
-                                    browser.view = GaeView::Jobs;
-                                    let _ = ensure_gae_token(app_state);
-                                    let _ = browser.load_jobs(app_state).await;
-                                }
-                            }
-                            KeyCode::Char('l') | KeyCode::Char('L') => {
-                                // Open load graph view (only from graphs view)
-                                if matches!(browser.view, GaeView::Graphs) {
-                                    browser.init_load_graph_state();
-                                    browser.view = GaeView::LoadGraphInput;
-                                }
-                            }
-                            KeyCode::Char('r') | KeyCode::Char('R') => {
-                                // Refresh current view
-                                match browser.view {
-                                    GaeView::Graphs => {
+                        _ => {
+                            // Handle other views
+                            match key.code {
+                                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                                KeyCode::Char('g') | KeyCode::Char('G') => {
+                                    if !matches!(browser.view, GaeView::Graphs) {
+                                        browser.view = GaeView::Graphs;
                                         let _ = ensure_gae_token(app_state);
                                         let _ = browser.load_graphs(app_state).await;
                                     }
-                                    GaeView::Jobs => {
+                                }
+                                KeyCode::Char('j') | KeyCode::Char('J') => {
+                                    if !matches!(browser.view, GaeView::Jobs) {
+                                        browser.view = GaeView::Jobs;
                                         let _ = ensure_gae_token(app_state);
                                         let _ = browser.load_jobs(app_state).await;
                                     }
+                                }
+                                KeyCode::Char('l') | KeyCode::Char('L') => {
+                                    // Open load graph view (only from graphs view)
+                                    if matches!(browser.view, GaeView::Graphs) {
+                                        browser.init_load_graph_state();
+                                        browser.view = GaeView::LoadGraphInput;
+                                    }
+                                }
+                                KeyCode::Char('r') | KeyCode::Char('R') => {
+                                    // Refresh current view
+                                    match browser.view {
+                                        GaeView::Graphs => {
+                                            let _ = ensure_gae_token(app_state);
+                                            let _ = browser.load_graphs(app_state).await;
+                                        }
+                                        GaeView::Jobs => {
+                                            let _ = ensure_gae_token(app_state);
+                                            let _ = browser.load_jobs(app_state).await;
+                                        }
+                                        GaeView::LoadGraphInput => {}
+                                    }
+                                }
+                                KeyCode::Down => match browser.view {
+                                    GaeView::Graphs => {
+                                        if !browser.graphs.is_empty() {
+                                            browser.selected_graph_index =
+                                                (browser.selected_graph_index + 1)
+                                                    % browser.graphs.len();
+                                        }
+                                    }
+                                    GaeView::Jobs => {
+                                        if !browser.jobs.is_empty() {
+                                            browser.selected_job_index =
+                                                (browser.selected_job_index + 1)
+                                                    % browser.jobs.len();
+                                        }
+                                    }
                                     GaeView::LoadGraphInput => {}
-                                }
+                                },
+                                KeyCode::Up => match browser.view {
+                                    GaeView::Graphs => {
+                                        if !browser.graphs.is_empty() {
+                                            browser.selected_graph_index =
+                                                if browser.selected_graph_index == 0 {
+                                                    browser.graphs.len() - 1
+                                                } else {
+                                                    browser.selected_graph_index - 1
+                                                };
+                                        }
+                                    }
+                                    GaeView::Jobs => {
+                                        if !browser.jobs.is_empty() {
+                                            browser.selected_job_index =
+                                                if browser.selected_job_index == 0 {
+                                                    browser.jobs.len() - 1
+                                                } else {
+                                                    browser.selected_job_index - 1
+                                                };
+                                        }
+                                    }
+                                    GaeView::LoadGraphInput => {}
+                                },
+                                _ => {}
                             }
-                            KeyCode::Down => match browser.view {
-                                GaeView::Graphs => {
-                                    if !browser.graphs.is_empty() {
-                                        browser.selected_graph_index =
-                                            (browser.selected_graph_index + 1)
-                                                % browser.graphs.len();
-                                    }
-                                }
-                                GaeView::Jobs => {
-                                    if !browser.jobs.is_empty() {
-                                        browser.selected_job_index =
-                                            (browser.selected_job_index + 1) % browser.jobs.len();
-                                    }
-                                }
-                                GaeView::LoadGraphInput => {}
-                            },
-                            KeyCode::Up => match browser.view {
-                                GaeView::Graphs => {
-                                    if !browser.graphs.is_empty() {
-                                        browser.selected_graph_index =
-                                            if browser.selected_graph_index == 0 {
-                                                browser.graphs.len() - 1
-                                            } else {
-                                                browser.selected_graph_index - 1
-                                            };
-                                    }
-                                }
-                                GaeView::Jobs => {
-                                    if !browser.jobs.is_empty() {
-                                        browser.selected_job_index =
-                                            if browser.selected_job_index == 0 {
-                                                browser.jobs.len() - 1
-                                            } else {
-                                                browser.selected_job_index - 1
-                                            };
-                                    }
-                                }
-                                GaeView::LoadGraphInput => {}
-                            },
-                            _ => {}
                         }
                     }
+                }
+            }
+        } else {
+            // Timeout occurred - auto-refresh based on current view
+            match browser.view {
+                GaeView::Graphs => {
+                    let _ = ensure_gae_token(app_state);
+                    let _ = browser.load_graphs(app_state).await;
+                }
+                GaeView::Jobs => {
+                    let _ = ensure_gae_token(app_state);
+                    let _ = browser.load_jobs(app_state).await;
+                }
+                GaeView::LoadGraphInput => {
+                    // Don't auto-refresh while user is editing
                 }
             }
         }
