@@ -304,8 +304,8 @@ where
     fn render(self, area: Rect, buf: &mut Buffer) {
         // Determine border color based on validation state
         let (border_color, status_text) = match &self.editor.validation_state {
-            ValidationState::Valid => (Color::Green, "✓ Valid"),
-            ValidationState::Invalid(_) => (Color::Red, "✗ Invalid"),
+            ValidationState::Valid => (Color::Green, "✓ Valid".to_string()),
+            ValidationState::Invalid(msg) => (Color::Red, format!("✗ Invalid: {}", msg)),
         };
 
         // Create block with colored border
