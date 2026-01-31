@@ -22,6 +22,7 @@ use crate::json_struct_editor::JsonStructEditor;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GraphLoadConfig {
     database: String,
+    graph_name: String,
     vertex_collections: Vec<String>,
     vertex_attributes: Vec<String>,
     vertex_attribute_types: Vec<String>,
@@ -34,6 +35,7 @@ impl Default for GraphLoadConfig {
     fn default() -> Self {
         Self {
             database: "_system".to_string(),
+            graph_name: "".to_string(),
             vertex_collections: vec!["V".to_string()],
             vertex_attributes: vec![],
             vertex_attribute_types: vec![],
