@@ -1,6 +1,7 @@
 mod arangodb;
 mod args;
 mod gae;
+mod json_struct_editor;
 
 use anyhow::{Context, Result};
 use args::Args;

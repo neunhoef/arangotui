@@ -15,7 +15,34 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::io;
-use tui_textarea::TextArea;
+
+use crate::json_struct_editor::JsonStructEditor;
+
+// Graph Load Configuration structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GraphLoadConfig {
+    database: String,
+    vertex_collections: Vec<String>,
+    vertex_attributes: Vec<String>,
+    vertex_attribute_types: Vec<String>,
+    edge_collections: Vec<String>,
+    parallelism: u32,
+    batch_size: u64,
+}
+
+impl Default for GraphLoadConfig {
+    fn default() -> Self {
+        Self {
+            database: "_system".to_string(),
+            vertex_collections: vec!["V".to_string()],
+            vertex_attributes: vec![],
+            vertex_attribute_types: vec![],
+            edge_collections: vec!["E".to_string()],
+            parallelism: 10,
+            batch_size: 4000000,
+        }
+    }
+}
 
 // GAE Version structure
 #[derive(Debug, Deserialize)]
@@ -293,8 +320,7 @@ enum LoadGraphField {
 }
 
 struct LoadGraphState {
-    textarea: TextArea<'static>,
-    json_valid: bool,
+    editor: JsonStructEditor<'static, GraphLoadConfig>,
     active_field: LoadGraphField,
 }
 
@@ -334,22 +360,12 @@ impl GaeBrowser {
     }
 
     fn init_load_graph_state(&mut self) {
-        let default_json = serde_json::json!({
-            "database": "_system",
-            "vertex_collections": ["V"],
-            "vertex_attributes": [],
-            "vertex_attribute_types": [],
-            "edge_collections": ["E"],
-            "parallelism": 10,
-            "batch_size": 4000000
-        });
-
-        let json_str = serde_json::to_string_pretty(&default_json).unwrap_or_default();
-        let textarea = TextArea::from(json_str.lines().map(|s| s.to_string()).collect::<Vec<_>>());
+        let default_config = GraphLoadConfig::default();
+        let editor = JsonStructEditor::new(default_config)
+            .with_title("Load Graph Configuration (JSON) | TAB: Switch fields | Q/ESC: Back");
 
         self.load_graph_state = Some(LoadGraphState {
-            textarea,
-            json_valid: true,
+            editor,
             active_field: LoadGraphField::JsonInput,
         });
     }
@@ -735,37 +751,8 @@ fn render_gae_load_graph(f: &mut Frame, area: Rect, browser: &mut GaeBrowser) {
             ])
             .split(area);
 
-        // JSON textarea
-        let validation_msg = if load_state.json_valid {
-            "✓ Valid JSON"
-        } else {
-            "✗ Invalid JSON"
-        };
-
-        load_state.textarea.set_block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(
-                    "Load Graph Configuration (JSON) - {} | TAB: Switch fields | Q/ESC: Back",
-                    validation_msg
-                ))
-                .border_style(
-                    if matches!(load_state.active_field, LoadGraphField::JsonInput) {
-                        if load_state.json_valid {
-                            Style::default().fg(Color::Cyan)
-                        } else {
-                            Style::default().fg(Color::Red)
-                        }
-                    } else {
-                        Style::default()
-                    },
-                ),
-        );
-        load_state.textarea.set_cursor_line_style(Style::default());
-        load_state
-            .textarea
-            .set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
-        f.render_widget(&load_state.textarea, chunks[0]);
+        // Render the JSON editor
+        f.render_widget(&load_state.editor, chunks[0]);
 
         // Submit button
         let submit_text = if matches!(load_state.active_field, LoadGraphField::Submit) {
@@ -966,16 +953,9 @@ pub async fn run_gae_browser(
                                         if matches!(load_state.active_field, LoadGraphField::Submit)
                                         {
                                             // Submit the load graph request
-                                            if load_state.json_valid {
-                                                let json_text =
-                                                    load_state.textarea.lines().join("\n");
-
-                                                // Parse the JSON
-                                                if let Ok(config) =
-                                                    serde_json::from_str::<serde_json::Value>(
-                                                        &json_text,
-                                                    )
-                                                {
+                                            if load_state.editor.validation_state().is_valid() {
+                                                // Get the validated config
+                                                if let Some(config) = load_state.editor.value() {
                                                     // Call the GAE API to load the graph
                                                     if let Some(endpoint) = gae_endpoint.clone() {
                                                         let _ = ensure_gae_token(
@@ -1039,29 +1019,22 @@ pub async fn run_gae_browser(
                                                 }
                                             }
                                         } else {
-                                            // Pass Enter to the textarea for newline
-                                            load_state.textarea.input(key);
-
-                                            // Validate JSON after input
-                                            let text = load_state.textarea.lines().join("\n");
-                                            load_state.json_valid =
-                                                serde_json::from_str::<serde_json::Value>(&text)
-                                                    .is_ok();
+                                            // Pass Enter to the editor for newline
+                                            if matches!(
+                                                load_state.active_field,
+                                                LoadGraphField::JsonInput
+                                            ) {
+                                                load_state.editor.handle_key_event(key);
+                                            }
                                         }
                                     }
                                     _ => {
-                                        // Pass other keys to the textarea only if we're in JsonInput field
+                                        // Pass other keys to the editor only if we're in JsonInput field
                                         if matches!(
                                             load_state.active_field,
                                             LoadGraphField::JsonInput
                                         ) {
-                                            load_state.textarea.input(key);
-
-                                            // Validate JSON after input
-                                            let text = load_state.textarea.lines().join("\n");
-                                            load_state.json_valid =
-                                                serde_json::from_str::<serde_json::Value>(&text)
-                                                    .is_ok();
+                                            load_state.editor.handle_key_event(key);
                                         }
                                     }
                                 }
