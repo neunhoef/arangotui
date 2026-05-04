@@ -12,20 +12,14 @@ use tui_textarea::TextArea;
 
 #[derive(Debug, Deserialize)]
 pub struct AqlQueryResponse {
-    pub error: bool,
-    pub code: u16,
     pub result: Vec<serde_json::Value>,
     #[serde(rename = "hasMore")]
     pub has_more: bool,
-    pub cached: bool,
-    pub extra: Option<serde_json::Value>,
     pub id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct AqlCursorNextResponse {
-    pub error: bool,
-    pub code: u16,
     pub result: Vec<serde_json::Value>,
     #[serde(rename = "hasMore")]
     pub has_more: bool,
@@ -167,6 +161,7 @@ pub async fn execute_aql_query(
     Ok(query_response.result)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_aql_query_with_params(
     client: &Client,
     endpoint: &str,
@@ -261,7 +256,12 @@ pub async fn fetch_cursor_next(
     Ok(cursor_response.unwrap())
 }
 
-pub fn render_aql_query_input(f: &mut Frame, area: Rect, aql_state: &mut AqlState, database: &str) {
+pub fn render_aql_query_input(
+    f: &mut Frame,
+    area: Rect,
+    aql_state: &mut AqlState,
+    _database: &str,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -415,9 +415,13 @@ pub fn render_aql_query_results(f: &mut Frame, area: Rect, aql_state: &AqlState,
         let mut lines_in_page = Vec::new();
         let mut current_line_count = 0;
         let start_doc_idx = aql_state.current_page * page_size;
-        let mut docs_in_page = 0;
-
-        for (idx, doc) in aql_state.results.iter().enumerate().skip(start_doc_idx) {
+        for (docs_in_page, (idx, doc)) in aql_state
+            .results
+            .iter()
+            .enumerate()
+            .skip(start_doc_idx)
+            .enumerate()
+        {
             if current_line_count >= page_size && docs_in_page > 0 {
                 break;
             }
@@ -433,10 +437,9 @@ pub fn render_aql_query_results(f: &mut Frame, area: Rect, aql_state: &AqlState,
                 lines_in_page.push(Line::from(line.to_string()));
                 current_line_count += 1;
             }
-            docs_in_page += 1;
         }
 
-        let total_pages = (aql_state.results.len() + page_size - 1) / page_size;
+        let total_pages = aql_state.results.len().div_ceil(page_size);
 
         let title = format!(
             "AQL Query Results - {} | Page {}/{} | {} docs | ← → : pages | ↑ ↓ PgUp PgDn: scroll | Q/ESC: back",

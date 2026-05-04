@@ -52,8 +52,6 @@ impl Default for GraphLoadConfig {
 // Note that for whatever reason we use camel case here and for backwards compatibility
 // reasons we cannot change this any more.
 pub struct GaeVersion {
-    pub api_max_version: u32,
-    pub api_min_version: u32,
     pub version: String,
 }
 
@@ -76,7 +74,6 @@ pub struct GaeJob {
     total: u32,
     progress: u32,
     error: bool,
-    error_code: i32,
     error_message: String,
     comp_type: String,
     memory_usage: u64,
@@ -294,15 +291,14 @@ pub fn ensure_gae_token(
     gae_jwt_secret: &Option<Vec<u8>>,
     gae_jwt_token: &mut Option<GaeJwtToken>,
 ) -> Result<()> {
-    if let Some(secret) = gae_jwt_secret {
-        if needs_token_refresh(gae_jwt_token) {
-            let expiry_seconds = 3600; // 1 hour
-            let token = create_gae_jwt_token(secret, expiry_seconds)?;
-            let expiry =
-                std::time::SystemTime::now() + std::time::Duration::from_secs(expiry_seconds);
+    if let Some(secret) = gae_jwt_secret
+        && needs_token_refresh(gae_jwt_token)
+    {
+        let expiry_seconds = 3600; // 1 hour
+        let token = create_gae_jwt_token(secret, expiry_seconds)?;
+        let expiry = std::time::SystemTime::now() + std::time::Duration::from_secs(expiry_seconds);
 
-            *gae_jwt_token = Some(GaeJwtToken { token, expiry });
-        }
+        *gae_jwt_token = Some(GaeJwtToken { token, expiry });
     }
     Ok(())
 }
@@ -839,199 +835,177 @@ pub async fn run_gae_browser(
         // Poll for events with a timeout of 1 second
         // This allows auto-refresh while still being responsive to user input
         if event::poll(std::time::Duration::from_millis(1000))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    // Handle error popup first if active
-                    if browser.error_popup.is_some() {
-                        // Any key dismisses the error popup
-                        browser.error_popup = None;
-                        continue;
-                    }
+            if let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+            {
+                // Handle error popup first if active
+                if browser.error_popup.is_some() {
+                    // Any key dismisses the error popup
+                    browser.error_popup = None;
+                    continue;
+                }
 
-                    // Handle confirmation dialog if active
-                    if let Some(dialog) = browser.confirmation_dialog.clone() {
-                        match key.code {
-                            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                                // Confirm deletion
-                                browser.confirmation_dialog = None;
+                // Handle confirmation dialog if active
+                if let Some(dialog) = browser.confirmation_dialog.clone() {
+                    match key.code {
+                        KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                            // Confirm deletion
+                            browser.confirmation_dialog = None;
 
-                                match dialog {
-                                    ConfirmationDialog::DeleteGraph(graph_id) => {
-                                        if let Some(endpoint) = gae_endpoint.clone() {
-                                            let _ = ensure_gae_token(gae_jwt_secret, gae_jwt_token);
-                                            let token =
-                                                gae_jwt_token.as_ref().map(|t| t.token.as_str());
+                            match dialog {
+                                ConfirmationDialog::DeleteGraph(graph_id) => {
+                                    if let Some(endpoint) = gae_endpoint.clone() {
+                                        let _ = ensure_gae_token(gae_jwt_secret, gae_jwt_token);
+                                        let token =
+                                            gae_jwt_token.as_ref().map(|t| t.token.as_str());
 
-                                            match delete_gae_graph(
-                                                http_client,
-                                                &endpoint,
-                                                graph_id,
-                                                token,
-                                            )
-                                            .await
-                                            {
-                                                Ok(_) => {
-                                                    // Refresh the graph list
-                                                    let _ = browser
-                                                        .load_graphs(
-                                                            http_client,
-                                                            gae_endpoint,
-                                                            gae_jwt_token,
-                                                        )
-                                                        .await;
-                                                }
-                                                Err(e) => {
-                                                    browser.error_popup = Some(format!(
-                                                        "Failed to delete graph: {}",
-                                                        e
-                                                    ));
-                                                }
+                                        match delete_gae_graph(
+                                            http_client,
+                                            &endpoint,
+                                            graph_id,
+                                            token,
+                                        )
+                                        .await
+                                        {
+                                            Ok(_) => {
+                                                // Refresh the graph list
+                                                let _ = browser
+                                                    .load_graphs(
+                                                        http_client,
+                                                        gae_endpoint,
+                                                        gae_jwt_token,
+                                                    )
+                                                    .await;
+                                            }
+                                            Err(e) => {
+                                                browser.error_popup =
+                                                    Some(format!("Failed to delete graph: {}", e));
                                             }
                                         }
                                     }
-                                    ConfirmationDialog::DeleteJob(job_id) => {
-                                        if let Some(endpoint) = gae_endpoint.clone() {
-                                            let _ = ensure_gae_token(gae_jwt_secret, gae_jwt_token);
-                                            let token =
-                                                gae_jwt_token.as_ref().map(|t| t.token.as_str());
+                                }
+                                ConfirmationDialog::DeleteJob(job_id) => {
+                                    if let Some(endpoint) = gae_endpoint.clone() {
+                                        let _ = ensure_gae_token(gae_jwt_secret, gae_jwt_token);
+                                        let token =
+                                            gae_jwt_token.as_ref().map(|t| t.token.as_str());
 
-                                            match delete_gae_job(
-                                                http_client,
-                                                &endpoint,
-                                                job_id,
-                                                token,
-                                            )
+                                        match delete_gae_job(http_client, &endpoint, job_id, token)
                                             .await
-                                            {
-                                                Ok(_) => {
-                                                    // Refresh the job list
-                                                    let _ = browser
-                                                        .load_jobs(
-                                                            http_client,
-                                                            gae_endpoint,
-                                                            gae_jwt_token,
-                                                        )
-                                                        .await;
-                                                }
-                                                Err(e) => {
-                                                    browser.error_popup = Some(format!(
-                                                        "Failed to delete job: {}",
-                                                        e
-                                                    ));
-                                                }
+                                        {
+                                            Ok(_) => {
+                                                // Refresh the job list
+                                                let _ = browser
+                                                    .load_jobs(
+                                                        http_client,
+                                                        gae_endpoint,
+                                                        gae_jwt_token,
+                                                    )
+                                                    .await;
+                                            }
+                                            Err(e) => {
+                                                browser.error_popup =
+                                                    Some(format!("Failed to delete job: {}", e));
                                             }
                                         }
                                     }
                                 }
                             }
-                            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                                // Cancel deletion
-                                browser.confirmation_dialog = None;
-                            }
-                            _ => {}
                         }
-                        continue;
+                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                            // Cancel deletion
+                            browser.confirmation_dialog = None;
+                        }
+                        _ => {}
                     }
+                    continue;
+                }
 
-                    match browser.view {
-                        GaeView::LoadGraphInput => {
-                            // Handle load graph input view
-                            if let Some(load_state) = &mut browser.load_graph_state {
-                                match key.code {
-                                    KeyCode::Char('q') | KeyCode::Esc => {
-                                        // Go back to graphs view
-                                        browser.view = GaeView::Graphs;
-                                        browser.load_graph_state = None;
-                                    }
-                                    KeyCode::Tab => {
-                                        // Switch between fields
-                                        load_state.active_field = match load_state.active_field {
-                                            LoadGraphField::JsonInput => LoadGraphField::Submit,
-                                            LoadGraphField::Submit => LoadGraphField::JsonInput,
-                                        };
-                                    }
-                                    KeyCode::Enter => {
-                                        // Check if we're on the Submit button
-                                        if matches!(load_state.active_field, LoadGraphField::Submit)
-                                        {
-                                            // Submit the load graph request
-                                            if load_state.editor.validation_state().is_valid() {
-                                                // Get the validated config
-                                                if let Some(config) = load_state.editor.value() {
-                                                    // Call the GAE API to load the graph
-                                                    if let Some(endpoint) = gae_endpoint.clone() {
-                                                        let _ = ensure_gae_token(
-                                                            gae_jwt_secret,
-                                                            gae_jwt_token,
-                                                        );
+                match browser.view {
+                    GaeView::LoadGraphInput => {
+                        // Handle load graph input view
+                        if let Some(load_state) = &mut browser.load_graph_state {
+                            match key.code {
+                                KeyCode::Char('q') | KeyCode::Esc => {
+                                    // Go back to graphs view
+                                    browser.view = GaeView::Graphs;
+                                    browser.load_graph_state = None;
+                                }
+                                KeyCode::Tab => {
+                                    // Switch between fields
+                                    load_state.active_field = match load_state.active_field {
+                                        LoadGraphField::JsonInput => LoadGraphField::Submit,
+                                        LoadGraphField::Submit => LoadGraphField::JsonInput,
+                                    };
+                                }
+                                KeyCode::Enter => {
+                                    // Check if we're on the Submit button
+                                    if matches!(load_state.active_field, LoadGraphField::Submit) {
+                                        // Submit the load graph request
+                                        if load_state.editor.validation_state().is_valid() {
+                                            // Get the validated config
+                                            if let Some(config) = load_state.editor.value() {
+                                                // Call the GAE API to load the graph
+                                                if let Some(endpoint) = gae_endpoint.clone() {
+                                                    let _ = ensure_gae_token(
+                                                        gae_jwt_secret,
+                                                        gae_jwt_token,
+                                                    );
 
-                                                        let url = format!(
-                                                            "{}/v1/loaddata",
-                                                            endpoint.trim_end_matches('/')
-                                                        );
+                                                    let url = format!(
+                                                        "{}/v1/loaddata",
+                                                        endpoint.trim_end_matches('/')
+                                                    );
 
-                                                        let token = gae_jwt_token
-                                                            .as_ref()
-                                                            .map(|t| t.token.as_str());
-                                                        let mut request =
-                                                            http_client.post(&url).json(&config);
+                                                    let token = gae_jwt_token
+                                                        .as_ref()
+                                                        .map(|t| t.token.as_str());
+                                                    let mut request =
+                                                        http_client.post(&url).json(&config);
 
-                                                        if let Some(jwt_token) = token {
-                                                            request =
-                                                                request.bearer_auth(jwt_token);
-                                                        }
+                                                    if let Some(jwt_token) = token {
+                                                        request = request.bearer_auth(jwt_token);
+                                                    }
 
-                                                        let response = request.send().await;
+                                                    let response = request.send().await;
 
-                                                        match response {
-                                                            Ok(resp)
-                                                                if resp.status().is_success() =>
-                                                            {
-                                                                // Successfully created the job, switch to jobs view
-                                                                browser.view = GaeView::Jobs;
-                                                                let _ = ensure_gae_token(
-                                                                    gae_jwt_secret,
+                                                    match response {
+                                                        Ok(resp) if resp.status().is_success() => {
+                                                            // Successfully created the job, switch to jobs view
+                                                            browser.view = GaeView::Jobs;
+                                                            let _ = ensure_gae_token(
+                                                                gae_jwt_secret,
+                                                                gae_jwt_token,
+                                                            );
+                                                            let _ = browser
+                                                                .load_jobs(
+                                                                    http_client,
+                                                                    gae_endpoint,
                                                                     gae_jwt_token,
-                                                                );
-                                                                let _ = browser
-                                                                    .load_jobs(
-                                                                        http_client,
-                                                                        gae_endpoint,
-                                                                        gae_jwt_token,
-                                                                    )
-                                                                    .await;
-                                                                browser.load_graph_state = None;
-                                                            }
-                                                            Ok(resp) => {
-                                                                // Error response - stay in load view
-                                                                eprintln!(
-                                                                    "Failed to load graph: {}",
-                                                                    resp.status()
-                                                                );
-                                                            }
-                                                            Err(e) => {
-                                                                // Network error - stay in load view
-                                                                eprintln!(
-                                                                    "Failed to load graph: {}",
-                                                                    e
-                                                                );
-                                                            }
+                                                                )
+                                                                .await;
+                                                            browser.load_graph_state = None;
+                                                        }
+                                                        Ok(resp) => {
+                                                            // Error response - stay in load view
+                                                            eprintln!(
+                                                                "Failed to load graph: {}",
+                                                                resp.status()
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            // Network error - stay in load view
+                                                            eprintln!(
+                                                                "Failed to load graph: {}",
+                                                                e
+                                                            );
                                                         }
                                                     }
                                                 }
                                             }
-                                        } else {
-                                            // Pass Enter to the editor for newline
-                                            if matches!(
-                                                load_state.active_field,
-                                                LoadGraphField::JsonInput
-                                            ) {
-                                                load_state.editor.handle_key_event(key);
-                                            }
                                         }
-                                    }
-                                    _ => {
-                                        // Pass other keys to the editor only if we're in JsonInput field
+                                    } else {
+                                        // Pass Enter to the editor for newline
                                         if matches!(
                                             load_state.active_field,
                                             LoadGraphField::JsonInput
@@ -1040,129 +1014,130 @@ pub async fn run_gae_browser(
                                         }
                                     }
                                 }
-                            }
-                        }
-                        _ => {
-                            // Handle other views
-                            match key.code {
-                                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                                KeyCode::Char('d') | KeyCode::Char('D') => {
-                                    // Delete current item
-                                    match browser.view {
-                                        GaeView::Graphs => {
-                                            if !browser.graphs.is_empty()
-                                                && browser.selected_graph_index
-                                                    < browser.graphs.len()
-                                            {
-                                                let graph_id = browser.graphs
-                                                    [browser.selected_graph_index]
-                                                    .graph_id;
-                                                browser.confirmation_dialog =
-                                                    Some(ConfirmationDialog::DeleteGraph(graph_id));
-                                            }
-                                        }
-                                        GaeView::Jobs => {
-                                            if !browser.jobs.is_empty()
-                                                && browser.selected_job_index < browser.jobs.len()
-                                            {
-                                                let job_id =
-                                                    browser.jobs[browser.selected_job_index].job_id;
-                                                browser.confirmation_dialog =
-                                                    Some(ConfirmationDialog::DeleteJob(job_id));
-                                            }
-                                        }
-                                        GaeView::LoadGraphInput => {}
+                                _ => {
+                                    // Pass other keys to the editor only if we're in JsonInput field
+                                    if matches!(load_state.active_field, LoadGraphField::JsonInput)
+                                    {
+                                        load_state.editor.handle_key_event(key);
                                     }
                                 }
-                                KeyCode::Char('g') | KeyCode::Char('G') => {
-                                    if !matches!(browser.view, GaeView::Graphs) {
-                                        browser.view = GaeView::Graphs;
+                            }
+                        }
+                    }
+                    _ => {
+                        // Handle other views
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                            KeyCode::Char('d') | KeyCode::Char('D') => {
+                                // Delete current item
+                                match browser.view {
+                                    GaeView::Graphs => {
+                                        if !browser.graphs.is_empty()
+                                            && browser.selected_graph_index < browser.graphs.len()
+                                        {
+                                            let graph_id = browser.graphs
+                                                [browser.selected_graph_index]
+                                                .graph_id;
+                                            browser.confirmation_dialog =
+                                                Some(ConfirmationDialog::DeleteGraph(graph_id));
+                                        }
+                                    }
+                                    GaeView::Jobs => {
+                                        if !browser.jobs.is_empty()
+                                            && browser.selected_job_index < browser.jobs.len()
+                                        {
+                                            let job_id =
+                                                browser.jobs[browser.selected_job_index].job_id;
+                                            browser.confirmation_dialog =
+                                                Some(ConfirmationDialog::DeleteJob(job_id));
+                                        }
+                                    }
+                                    GaeView::LoadGraphInput => {}
+                                }
+                            }
+                            KeyCode::Char('g') | KeyCode::Char('G') => {
+                                if !matches!(browser.view, GaeView::Graphs) {
+                                    browser.view = GaeView::Graphs;
+                                    let _ = ensure_gae_token(gae_jwt_secret, gae_jwt_token);
+                                    let _ = browser
+                                        .load_graphs(http_client, gae_endpoint, gae_jwt_token)
+                                        .await;
+                                }
+                            }
+                            KeyCode::Char('j') | KeyCode::Char('J') => {
+                                if !matches!(browser.view, GaeView::Jobs) {
+                                    browser.view = GaeView::Jobs;
+                                    let _ = ensure_gae_token(gae_jwt_secret, gae_jwt_token);
+                                    let _ = browser
+                                        .load_jobs(http_client, gae_endpoint, gae_jwt_token)
+                                        .await;
+                                }
+                            }
+                            KeyCode::Char('l') | KeyCode::Char('L') => {
+                                // Open load graph view (from graphs or jobs view)
+                                if matches!(browser.view, GaeView::Graphs | GaeView::Jobs) {
+                                    browser.init_load_graph_state();
+                                    browser.view = GaeView::LoadGraphInput;
+                                }
+                            }
+                            KeyCode::Char('r') | KeyCode::Char('R') => {
+                                // Refresh current view
+                                match browser.view {
+                                    GaeView::Graphs => {
                                         let _ = ensure_gae_token(gae_jwt_secret, gae_jwt_token);
                                         let _ = browser
                                             .load_graphs(http_client, gae_endpoint, gae_jwt_token)
                                             .await;
                                     }
-                                }
-                                KeyCode::Char('j') | KeyCode::Char('J') => {
-                                    if !matches!(browser.view, GaeView::Jobs) {
-                                        browser.view = GaeView::Jobs;
+                                    GaeView::Jobs => {
                                         let _ = ensure_gae_token(gae_jwt_secret, gae_jwt_token);
                                         let _ = browser
                                             .load_jobs(http_client, gae_endpoint, gae_jwt_token)
                                             .await;
                                     }
-                                }
-                                KeyCode::Char('l') | KeyCode::Char('L') => {
-                                    // Open load graph view (from graphs or jobs view)
-                                    if matches!(browser.view, GaeView::Graphs | GaeView::Jobs) {
-                                        browser.init_load_graph_state();
-                                        browser.view = GaeView::LoadGraphInput;
-                                    }
-                                }
-                                KeyCode::Char('r') | KeyCode::Char('R') => {
-                                    // Refresh current view
-                                    match browser.view {
-                                        GaeView::Graphs => {
-                                            let _ = ensure_gae_token(gae_jwt_secret, gae_jwt_token);
-                                            let _ = browser
-                                                .load_graphs(
-                                                    http_client,
-                                                    gae_endpoint,
-                                                    gae_jwt_token,
-                                                )
-                                                .await;
-                                        }
-                                        GaeView::Jobs => {
-                                            let _ = ensure_gae_token(gae_jwt_secret, gae_jwt_token);
-                                            let _ = browser
-                                                .load_jobs(http_client, gae_endpoint, gae_jwt_token)
-                                                .await;
-                                        }
-                                        GaeView::LoadGraphInput => {}
-                                    }
-                                }
-                                KeyCode::Down => match browser.view {
-                                    GaeView::Graphs => {
-                                        if !browser.graphs.is_empty() {
-                                            browser.selected_graph_index =
-                                                (browser.selected_graph_index + 1)
-                                                    % browser.graphs.len();
-                                        }
-                                    }
-                                    GaeView::Jobs => {
-                                        if !browser.jobs.is_empty() {
-                                            browser.selected_job_index =
-                                                (browser.selected_job_index + 1)
-                                                    % browser.jobs.len();
-                                        }
-                                    }
                                     GaeView::LoadGraphInput => {}
-                                },
-                                KeyCode::Up => match browser.view {
-                                    GaeView::Graphs => {
-                                        if !browser.graphs.is_empty() {
-                                            browser.selected_graph_index =
-                                                if browser.selected_graph_index == 0 {
-                                                    browser.graphs.len() - 1
-                                                } else {
-                                                    browser.selected_graph_index - 1
-                                                };
-                                        }
-                                    }
-                                    GaeView::Jobs => {
-                                        if !browser.jobs.is_empty() {
-                                            browser.selected_job_index =
-                                                if browser.selected_job_index == 0 {
-                                                    browser.jobs.len() - 1
-                                                } else {
-                                                    browser.selected_job_index - 1
-                                                };
-                                        }
-                                    }
-                                    GaeView::LoadGraphInput => {}
-                                },
-                                _ => {}
+                                }
                             }
+                            KeyCode::Down => match browser.view {
+                                GaeView::Graphs => {
+                                    if !browser.graphs.is_empty() {
+                                        browser.selected_graph_index =
+                                            (browser.selected_graph_index + 1)
+                                                % browser.graphs.len();
+                                    }
+                                }
+                                GaeView::Jobs => {
+                                    if !browser.jobs.is_empty() {
+                                        browser.selected_job_index =
+                                            (browser.selected_job_index + 1) % browser.jobs.len();
+                                    }
+                                }
+                                GaeView::LoadGraphInput => {}
+                            },
+                            KeyCode::Up => match browser.view {
+                                GaeView::Graphs => {
+                                    if !browser.graphs.is_empty() {
+                                        browser.selected_graph_index =
+                                            if browser.selected_graph_index == 0 {
+                                                browser.graphs.len() - 1
+                                            } else {
+                                                browser.selected_graph_index - 1
+                                            };
+                                    }
+                                }
+                                GaeView::Jobs => {
+                                    if !browser.jobs.is_empty() {
+                                        browser.selected_job_index =
+                                            if browser.selected_job_index == 0 {
+                                                browser.jobs.len() - 1
+                                            } else {
+                                                browser.selected_job_index - 1
+                                            };
+                                    }
+                                }
+                                GaeView::LoadGraphInput => {}
+                            },
+                            _ => {}
                         }
                     }
                 }

@@ -173,56 +173,55 @@ async fn app_loop(
     loop {
         terminal.draw(|f| render_main_menu(f, app_state))?;
 
-        if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press {
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let menu_items_count = MenuItem::items().len();
-                        app_state.selected_menu_item =
-                            (app_state.selected_menu_item + 1) % menu_items_count;
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        let menu_items_count = MenuItem::items().len();
-                        app_state.selected_menu_item = if app_state.selected_menu_item == 0 {
-                            menu_items_count - 1
-                        } else {
-                            app_state.selected_menu_item - 1
-                        };
-                    }
-                    KeyCode::Enter => {
-                        if let Some(menu_item) = MenuItem::from_index(app_state.selected_menu_item)
-                        {
-                            match menu_item {
-                                MenuItem::Quit => return Ok(()),
-                                MenuItem::BrowseDatabase => {
-                                    arangodb::run_database_browser(
-                                        terminal,
-                                        &app_state.http_client,
-                                        &app_state.arango_endpoint,
-                                        &app_state.username,
-                                        &app_state.password,
-                                    )
-                                    .await?;
-                                }
-                                MenuItem::Gae => {
-                                    gae::run_gae_browser(
-                                        terminal,
-                                        &app_state.http_client,
-                                        &app_state.gae_endpoint,
-                                        &app_state.gae_jwt_secret,
-                                        &mut app_state.gae_jwt_token,
-                                    )
-                                    .await?;
-                                }
-                                MenuItem::Options => {
-                                    // TODO: Implement
-                                }
+        if let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let menu_items_count = MenuItem::items().len();
+                    app_state.selected_menu_item =
+                        (app_state.selected_menu_item + 1) % menu_items_count;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    let menu_items_count = MenuItem::items().len();
+                    app_state.selected_menu_item = if app_state.selected_menu_item == 0 {
+                        menu_items_count - 1
+                    } else {
+                        app_state.selected_menu_item - 1
+                    };
+                }
+                KeyCode::Enter => {
+                    if let Some(menu_item) = MenuItem::from_index(app_state.selected_menu_item) {
+                        match menu_item {
+                            MenuItem::Quit => return Ok(()),
+                            MenuItem::BrowseDatabase => {
+                                arangodb::run_database_browser(
+                                    terminal,
+                                    &app_state.http_client,
+                                    &app_state.arango_endpoint,
+                                    &app_state.username,
+                                    &app_state.password,
+                                )
+                                .await?;
+                            }
+                            MenuItem::Gae => {
+                                gae::run_gae_browser(
+                                    terminal,
+                                    &app_state.http_client,
+                                    &app_state.gae_endpoint,
+                                    &app_state.gae_jwt_secret,
+                                    &mut app_state.gae_jwt_token,
+                                )
+                                .await?;
+                            }
+                            MenuItem::Options => {
+                                // TODO: Implement
                             }
                         }
                     }
-                    _ => {}
                 }
+                _ => {}
             }
         }
     }

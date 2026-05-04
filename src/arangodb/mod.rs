@@ -1,14 +1,14 @@
 pub mod aql;
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table},
+    text::Line,
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
 };
 use reqwest::Client;
 use serde::Deserialize;
@@ -16,35 +16,26 @@ use std::io;
 
 #[derive(Debug, Deserialize)]
 pub struct ArangoVersion {
-    pub server: String,
     pub license: String,
     pub version: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct DatabaseListResponse {
-    error: bool,
-    code: u16,
     result: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct CollectionInfo {
-    pub id: String,
     pub name: String,
-    pub status: u32,
     #[serde(rename = "type")]
     pub collection_type: u32,
     #[serde(rename = "isSystem")]
     pub is_system: bool,
-    #[serde(rename = "globallyUniqueId")]
-    pub globally_unique_id: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct CollectionListResponse {
-    error: bool,
-    code: u16,
     result: Vec<CollectionInfo>,
 }
 
@@ -115,8 +106,6 @@ pub struct GraphInfo {
 
 #[derive(Debug, Deserialize)]
 struct GraphListResponse {
-    error: bool,
-    code: u16,
     graphs: Vec<GraphInfo>,
 }
 
@@ -286,6 +275,7 @@ impl DatabaseBrowser {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn load_documents(
         &mut self,
         client: &Client,
@@ -1088,650 +1078,583 @@ pub async fn run_database_browser(
             }
         })?;
 
-        if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press {
-                // Handle input dialog first if active
-                if let InputState::EnteringDocumentCount(ref mut input) = browser.input_state {
-                    match key.code {
-                        KeyCode::Char(c) if c.is_ascii_digit() => {
-                            input.push(c);
-                        }
-                        KeyCode::Backspace => {
-                            input.pop();
-                        }
-                        KeyCode::Enter => {
-                            let count: usize = input.parse().unwrap_or(10);
-                            browser.input_state = InputState::None;
-
-                            // Load documents based on current view
-                            if let BrowserView::CollectionList(db) = &browser.view {
-                                if browser.selected_coll_index < browser.collections.len() {
-                                    let coll_name = browser.collections
-                                        [browser.selected_coll_index]
-                                        .info
-                                        .name
-                                        .clone();
-                                    let db_clone = db.clone();
-                                    browser
-                                        .load_documents(
-                                            client, endpoint, &db_clone, &coll_name, count,
-                                            username, password,
-                                        )
-                                        .await?;
-                                    browser.view = BrowserView::DocumentViewer(db_clone, coll_name);
-                                }
-                            }
-                        }
-                        KeyCode::Esc => {
-                            browser.input_state = InputState::None;
-                        }
-                        _ => {}
+        if let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            // Handle input dialog first if active
+            if let InputState::EnteringDocumentCount(ref mut input) = browser.input_state {
+                match key.code {
+                    KeyCode::Char(c) if c.is_ascii_digit() => {
+                        input.push(c);
                     }
-                    continue;
-                }
+                    KeyCode::Backspace => {
+                        input.pop();
+                    }
+                    KeyCode::Enter => {
+                        let count: usize = input.parse().unwrap_or(10);
+                        browser.input_state = InputState::None;
 
-                match browser.view.clone() {
-                    BrowserView::DatabaseList => match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            if !browser.database_stats.is_empty() {
-                                browser.selected_db_index =
-                                    (browser.selected_db_index + 1) % browser.database_stats.len();
-                            }
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            if !browser.database_stats.is_empty() {
-                                browser.selected_db_index = if browser.selected_db_index == 0 {
-                                    browser.database_stats.len() - 1
-                                } else {
-                                    browser.selected_db_index - 1
-                                };
-                            }
-                        }
-                        KeyCode::Enter => {
-                            if browser.selected_db_index < browser.database_stats.len() {
-                                let db_name = browser.database_stats[browser.selected_db_index]
-                                    .name
-                                    .clone();
-                                if browser.database_stats[browser.selected_db_index].accessible {
-                                    browser
-                                        .load_collections(
-                                            client, endpoint, &db_name, username, password,
-                                        )
-                                        .await?;
-                                    browser.view = BrowserView::CollectionList(db_name);
-                                }
-                            }
-                        }
-                        _ => {}
-                    },
-                    BrowserView::CollectionList(db) => match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => {
-                            browser.view = BrowserView::DatabaseList;
-                            browser.collections.clear();
-                        }
-                        KeyCode::Backspace => {
-                            // Navigate back to previous view if we came from graph view
-                            if let Some((prev_view, prev_index)) = browser.navigation_stack.pop() {
-                                match &prev_view {
-                                    BrowserView::GraphList(prev_db) => {
-                                        browser
-                                            .load_graphs(
-                                                client, endpoint, username, password, prev_db,
-                                            )
-                                            .await?;
-                                        browser.selected_graph_index = prev_index;
-                                        browser.view = prev_view;
-                                    }
-                                    _ => {
-                                        // For other views, just restore
-                                        browser.view = prev_view;
-                                    }
-                                }
-                            }
-                        }
-                        KeyCode::Char('g') | KeyCode::Char('G') => {
+                        // Load documents based on current view
+                        if let BrowserView::CollectionList(db) = &browser.view
+                            && browser.selected_coll_index < browser.collections.len()
+                        {
+                            let coll_name = browser.collections[browser.selected_coll_index]
+                                .info
+                                .name
+                                .clone();
+                            let db_clone = db.clone();
                             browser
-                                .load_graphs(client, endpoint, &db, username, password)
+                                .load_documents(
+                                    client, endpoint, &db_clone, &coll_name, count, username,
+                                    password,
+                                )
                                 .await?;
-                            browser.view = BrowserView::GraphList(db.clone());
+                            browser.view = BrowserView::DocumentViewer(db_clone, coll_name);
                         }
-                        KeyCode::Char('a') | KeyCode::Char('A') => {
-                            // Open AQL query view (initialize state only if needed)
-                            if browser.aql_state.is_none() {
-                                browser.init_aql_state();
-                            }
-                            browser.view = BrowserView::AqlQueryInput(db.clone());
+                    }
+                    KeyCode::Esc => {
+                        browser.input_state = InputState::None;
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
+            match browser.view.clone() {
+                BrowserView::DatabaseList => match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if !browser.database_stats.is_empty() {
+                            browser.selected_db_index =
+                                (browser.selected_db_index + 1) % browser.database_stats.len();
                         }
-                        KeyCode::Char(' ') => {
-                            // Open input dialog for document count
-                            browser.input_state =
-                                InputState::EnteringDocumentCount("10".to_string());
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if !browser.database_stats.is_empty() {
+                            browser.selected_db_index = if browser.selected_db_index == 0 {
+                                browser.database_stats.len() - 1
+                            } else {
+                                browser.selected_db_index - 1
+                            };
                         }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            if !browser.collections.is_empty() {
-                                browser.selected_coll_index =
-                                    (browser.selected_coll_index + 1) % browser.collections.len();
-                            }
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            if !browser.collections.is_empty() {
-                                browser.selected_coll_index = if browser.selected_coll_index == 0 {
-                                    browser.collections.len() - 1
-                                } else {
-                                    browser.selected_coll_index - 1
-                                };
-                            }
-                        }
-                        KeyCode::Enter => {
-                            if browser.selected_coll_index < browser.collections.len() {
-                                let coll_name = browser.collections[browser.selected_coll_index]
-                                    .info
-                                    .name
-                                    .clone();
+                    }
+                    KeyCode::Enter => {
+                        if browser.selected_db_index < browser.database_stats.len() {
+                            let db_name = browser.database_stats[browser.selected_db_index]
+                                .name
+                                .clone();
+                            if browser.database_stats[browser.selected_db_index].accessible {
                                 browser
-                                    .load_collection_details(
-                                        client, endpoint, &db, &coll_name, username, password,
+                                    .load_collections(
+                                        client, endpoint, &db_name, username, password,
                                     )
                                     .await?;
-                                browser.view =
-                                    BrowserView::CollectionProperties(db.clone(), coll_name);
+                                browser.view = BrowserView::CollectionList(db_name);
                             }
                         }
-                        _ => {}
-                    },
-                    BrowserView::GraphList(db) => match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => {
-                            browser.view = BrowserView::DatabaseList;
-                            browser.graphs.clear();
-                        }
-                        KeyCode::Char('c') | KeyCode::Char('C') => {
-                            browser.view = BrowserView::CollectionList(db.clone());
-                        }
-                        KeyCode::Char('a') | KeyCode::Char('A') => {
-                            // Open AQL query view (initialize state only if needed)
-                            if browser.aql_state.is_none() {
-                                browser.init_aql_state();
-                            }
-                            browser.view = BrowserView::AqlQueryInput(db.clone());
-                        }
-                        KeyCode::Enter => {
-                            // Determine what was selected
-                            if let Some((graph_idx, edge_idx)) = browser.find_selected_graph_item()
-                            {
-                                if edge_idx.is_none() {
-                                    // Graph row selected - show graph properties
-                                    let graph_name = browser.graphs[graph_idx].name.clone();
+                    }
+                    _ => {}
+                },
+                BrowserView::CollectionList(db) => match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        browser.view = BrowserView::DatabaseList;
+                        browser.collections.clear();
+                    }
+                    KeyCode::Backspace => {
+                        // Navigate back to previous view if we came from graph view
+                        if let Some((prev_view, prev_index)) = browser.navigation_stack.pop() {
+                            match &prev_view {
+                                BrowserView::GraphList(prev_db) => {
                                     browser
-                                        .load_graph_details(
-                                            client,
-                                            endpoint,
-                                            &db,
-                                            &graph_name,
-                                            username,
-                                            password,
-                                        )
+                                        .load_graphs(client, endpoint, username, password, prev_db)
                                         .await?;
-                                    browser.view =
-                                        BrowserView::GraphProperties(db.clone(), graph_name);
-                                } else {
-                                    // Edge definition row selected - navigate to edge collection
-                                    let edge_idx = edge_idx.unwrap();
-                                    let edge_collection = browser.graphs[graph_idx]
-                                        .edge_definitions[edge_idx]
-                                        .collection
-                                        .clone();
-
-                                    // Push current view to navigation stack
-                                    browser
-                                        .navigation_stack
-                                        .push((browser.view.clone(), browser.selected_graph_index));
-
-                                    // Load collections and find the edge collection
-                                    browser
-                                        .load_collections(client, endpoint, &db, username, password)
-                                        .await?;
-                                    if let Some(pos) = browser
-                                        .collections
-                                        .iter()
-                                        .position(|c| c.info.name == edge_collection)
-                                    {
-                                        browser.selected_coll_index = pos;
-                                    }
-                                    browser.view = BrowserView::CollectionList(db.clone());
+                                    browser.selected_graph_index = prev_index;
+                                    browser.view = prev_view;
+                                }
+                                _ => {
+                                    // For other views, just restore
+                                    browser.view = prev_view;
                                 }
                             }
                         }
-                        KeyCode::Char('v') | KeyCode::Char('V') => {
-                            // Navigate to first vertex collection in the edge definition
-                            if let Some((graph_idx, Some(edge_idx))) =
-                                browser.find_selected_graph_item()
-                            {
-                                let edge_def =
-                                    &browser.graphs[graph_idx].edge_definitions[edge_idx];
-                                if let Some(first_from) = edge_def.from.first().cloned() {
-                                    // Push current view to navigation stack
-                                    browser
-                                        .navigation_stack
-                                        .push((browser.view.clone(), browser.selected_graph_index));
-
-                                    // Load collections and find the vertex collection
-                                    browser
-                                        .load_collections(client, endpoint, &db, username, password)
-                                        .await?;
-                                    if let Some(pos) = browser
-                                        .collections
-                                        .iter()
-                                        .position(|c| c.info.name == first_from)
-                                    {
-                                        browser.selected_coll_index = pos;
-                                    }
-                                    browser.view = BrowserView::CollectionList(db.clone());
-                                }
-                            }
+                    }
+                    KeyCode::Char('g') | KeyCode::Char('G') => {
+                        browser
+                            .load_graphs(client, endpoint, &db, username, password)
+                            .await?;
+                        browser.view = BrowserView::GraphList(db.clone());
+                    }
+                    KeyCode::Char('a') | KeyCode::Char('A') => {
+                        // Open AQL query view (initialize state only if needed)
+                        if browser.aql_state.is_none() {
+                            browser.init_aql_state();
                         }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            if !browser.graphs.is_empty() {
-                                // Calculate total number of rows (graphs + edge definitions + spacing)
-                                let mut total_rows = 0;
-                                for graph in &browser.graphs {
-                                    total_rows += 1; // graph name row
-                                    total_rows += graph.edge_definitions.len(); // edge definition rows
-                                }
-                                total_rows += browser.graphs.len().saturating_sub(1); // spacing rows between graphs
-
-                                if total_rows > 0 {
-                                    browser.selected_graph_index =
-                                        (browser.selected_graph_index + 1) % total_rows;
-                                }
-                            }
+                        browser.view = BrowserView::AqlQueryInput(db.clone());
+                    }
+                    KeyCode::Char(' ') => {
+                        // Open input dialog for document count
+                        browser.input_state = InputState::EnteringDocumentCount("10".to_string());
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if !browser.collections.is_empty() {
+                            browser.selected_coll_index =
+                                (browser.selected_coll_index + 1) % browser.collections.len();
                         }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            if !browser.graphs.is_empty() {
-                                // Calculate total number of rows
-                                let mut total_rows = 0;
-                                for graph in &browser.graphs {
-                                    total_rows += 1; // graph name row
-                                    total_rows += graph.edge_definitions.len(); // edge definition rows
-                                }
-                                total_rows += browser.graphs.len().saturating_sub(1); // spacing rows between graphs
-
-                                if total_rows > 0 {
-                                    browser.selected_graph_index =
-                                        if browser.selected_graph_index == 0 {
-                                            total_rows - 1
-                                        } else {
-                                            browser.selected_graph_index - 1
-                                        };
-                                }
-                            }
-                        }
-                        _ => {}
-                    },
-                    BrowserView::CollectionProperties(db, _coll) => match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => {
-                            browser.view = BrowserView::CollectionList(db.clone());
-                            browser.collection_details = None;
-                            browser.scroll_offset = 0;
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            browser.scroll_offset = browser.scroll_offset.saturating_add(1);
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            browser.scroll_offset = browser.scroll_offset.saturating_sub(1);
-                        }
-                        KeyCode::PageDown => {
-                            browser.scroll_offset = browser.scroll_offset.saturating_add(10);
-                        }
-                        KeyCode::PageUp => {
-                            browser.scroll_offset = browser.scroll_offset.saturating_sub(10);
-                        }
-                        _ => {}
-                    },
-                    BrowserView::DocumentViewer(db, _coll) => match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => {
-                            browser.view = BrowserView::CollectionList(db.clone());
-                            browser.documents.clear();
-                            browser.scroll_offset = 0;
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            browser.scroll_offset = browser.scroll_offset.saturating_add(1);
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            browser.scroll_offset = browser.scroll_offset.saturating_sub(1);
-                        }
-                        KeyCode::PageDown => {
-                            browser.scroll_offset = browser.scroll_offset.saturating_add(10);
-                        }
-                        KeyCode::PageUp => {
-                            browser.scroll_offset = browser.scroll_offset.saturating_sub(10);
-                        }
-                        _ => {}
-                    },
-                    BrowserView::GraphProperties(db, _graph) => match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => {
-                            browser.view = BrowserView::GraphList(db.clone());
-                            browser.graph_details = None;
-                            browser.scroll_offset = 0;
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            browser.scroll_offset = browser.scroll_offset.saturating_add(1);
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            browser.scroll_offset = browser.scroll_offset.saturating_sub(1);
-                        }
-                        KeyCode::PageDown => {
-                            browser.scroll_offset = browser.scroll_offset.saturating_add(10);
-                        }
-                        KeyCode::PageUp => {
-                            browser.scroll_offset = browser.scroll_offset.saturating_sub(10);
-                        }
-                        _ => {}
-                    },
-                    BrowserView::AqlQueryInput(db) => {
-                        // Handle AQL input view keys
-                        use crossterm::event::KeyModifiers;
-
-                        if let Some(aql_state) = &mut browser.aql_state {
-                            // Check for Ctrl+Enter first (before other key handling)
-                            if key.code == KeyCode::Enter
-                                && key.modifiers.contains(KeyModifiers::CONTROL)
-                            {
-                                // Execute query
-                                if aql_state.parameters_valid && aql_state.options_valid {
-                                    let query_text = aql_state.query_textarea.lines().join("\n");
-                                    let params_text =
-                                        aql_state.parameters_textarea.lines().join("\n");
-                                    let options_text =
-                                        aql_state.options_textarea.lines().join("\n");
-
-                                    // Parse parameters
-                                    let bind_vars = if params_text.trim() == "{}" {
-                                        None
-                                    } else {
-                                        serde_json::from_str(&params_text).ok()
-                                    };
-
-                                    // Parse options
-                                    let options: Result<serde_json::Value, _> =
-                                        serde_json::from_str(&options_text);
-
-                                    if let Ok(opts) = options {
-                                        let batch_size =
-                                            opts["batchSize"].as_u64().unwrap_or(1000) as usize;
-                                        let stream = opts["stream"].as_bool().unwrap_or(true);
-                                        let max_documents =
-                                            opts["maxDocuments"].as_u64().unwrap_or(100000)
-                                                as usize;
-
-                                        // Execute query
-                                        aql_state.is_fetching = true;
-                                        aql_state.results.clear();
-                                        aql_state.total_fetched = 0;
-                                        aql_state.has_more = false;
-                                        aql_state.cursor_id = None;
-
-                                        browser.view = BrowserView::AqlQueryResults(db.clone());
-
-                                        // Start fetching - first batch
-                                        match aql::execute_aql_query_with_params(
-                                            client,
-                                            endpoint,
-                                            &db,
-                                            &query_text,
-                                            bind_vars.clone(),
-                                            batch_size,
-                                            stream,
-                                            username,
-                                            password,
-                                        )
-                                        .await
-                                        {
-                                            Ok(response) => {
-                                                // Store initial results
-                                                let mut all_results = response.result;
-                                                let mut has_more = response.has_more;
-                                                let mut cursor_id = response.id;
-
-                                                // Continue fetching if there's more
-                                                while has_more && all_results.len() < max_documents
-                                                {
-                                                    if let Some(ref cursor) = cursor_id {
-                                                        match aql::fetch_cursor_next(
-                                                            client, endpoint, &db, cursor,
-                                                            username, password,
-                                                        )
-                                                        .await
-                                                        {
-                                                            Ok(cursor_response) => {
-                                                                all_results
-                                                                    .extend(cursor_response.result);
-                                                                has_more = cursor_response.has_more;
-                                                                cursor_id = cursor_response.id;
-                                                            }
-                                                            Err(_) => {
-                                                                break;
-                                                            }
-                                                        }
-                                                    } else {
-                                                        break;
-                                                    }
-                                                }
-
-                                                // Update state once with all results
-                                                if let Some(aql_state) = browser.aql_state.as_mut()
-                                                {
-                                                    aql_state.results = all_results;
-                                                    aql_state.total_fetched =
-                                                        aql_state.results.len();
-                                                    aql_state.has_more = has_more;
-                                                    aql_state.cursor_id = cursor_id;
-                                                    aql_state.is_fetching = false;
-                                                }
-                                            }
-                                            Err(_e) => {
-                                                // Query failed - go back to input
-                                                browser.view =
-                                                    BrowserView::AqlQueryInput(db.clone());
-                                                if let Some(aql_state) = &mut browser.aql_state {
-                                                    aql_state.is_fetching = false;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if !browser.collections.is_empty() {
+                            browser.selected_coll_index = if browser.selected_coll_index == 0 {
+                                browser.collections.len() - 1
                             } else {
-                                // Handle other keys
-                                match key.code {
-                                    KeyCode::Char('q') | KeyCode::Esc => {
-                                        // Return to collection list but keep AQL state
-                                        browser.view = BrowserView::CollectionList(db.clone());
-                                    }
-                                    KeyCode::Tab => {
-                                        // Switch between fields including Submit button
-                                        aql_state.active_field = match aql_state.active_field {
-                                            aql::AqlInputField::Query => {
-                                                aql::AqlInputField::Parameters
-                                            }
-                                            aql::AqlInputField::Parameters => {
-                                                aql::AqlInputField::Options
-                                            }
-                                            aql::AqlInputField::Options => {
-                                                aql::AqlInputField::Submit
-                                            }
-                                            aql::AqlInputField::Submit => aql::AqlInputField::Query,
-                                        };
-                                    }
-                                    KeyCode::Enter => {
-                                        // Check if we're on the Submit button
-                                        if matches!(
-                                            aql_state.active_field,
-                                            aql::AqlInputField::Submit
-                                        ) {
-                                            // Execute query when Enter is pressed on Submit button
-                                            if aql_state.parameters_valid && aql_state.options_valid
-                                            {
-                                                let query_text =
-                                                    aql_state.query_textarea.lines().join("\n");
-                                                let params_text = aql_state
-                                                    .parameters_textarea
-                                                    .lines()
-                                                    .join("\n");
-                                                let options_text =
-                                                    aql_state.options_textarea.lines().join("\n");
+                                browser.selected_coll_index - 1
+                            };
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if browser.selected_coll_index < browser.collections.len() {
+                            let coll_name = browser.collections[browser.selected_coll_index]
+                                .info
+                                .name
+                                .clone();
+                            browser
+                                .load_collection_details(
+                                    client, endpoint, &db, &coll_name, username, password,
+                                )
+                                .await?;
+                            browser.view = BrowserView::CollectionProperties(db.clone(), coll_name);
+                        }
+                    }
+                    _ => {}
+                },
+                BrowserView::GraphList(db) => match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        browser.view = BrowserView::DatabaseList;
+                        browser.graphs.clear();
+                    }
+                    KeyCode::Char('c') | KeyCode::Char('C') => {
+                        browser.view = BrowserView::CollectionList(db.clone());
+                    }
+                    KeyCode::Char('a') | KeyCode::Char('A') => {
+                        // Open AQL query view (initialize state only if needed)
+                        if browser.aql_state.is_none() {
+                            browser.init_aql_state();
+                        }
+                        browser.view = BrowserView::AqlQueryInput(db.clone());
+                    }
+                    KeyCode::Enter => {
+                        // Determine what was selected
+                        if let Some((graph_idx, edge_idx)) = browser.find_selected_graph_item() {
+                            if let Some(edge_idx) = edge_idx {
+                                // Edge definition row selected - navigate to edge collection
+                                let edge_collection = browser.graphs[graph_idx].edge_definitions
+                                    [edge_idx]
+                                    .collection
+                                    .clone();
 
-                                                // Parse parameters
-                                                let bind_vars = if params_text.trim() == "{}" {
-                                                    None
-                                                } else {
-                                                    serde_json::from_str(&params_text).ok()
-                                                };
+                                // Push current view to navigation stack
+                                browser
+                                    .navigation_stack
+                                    .push((browser.view.clone(), browser.selected_graph_index));
 
-                                                // Parse options
-                                                let options: Result<serde_json::Value, _> =
-                                                    serde_json::from_str(&options_text);
+                                // Load collections and find the edge collection
+                                browser
+                                    .load_collections(client, endpoint, &db, username, password)
+                                    .await?;
+                                if let Some(pos) = browser
+                                    .collections
+                                    .iter()
+                                    .position(|c| c.info.name == edge_collection)
+                                {
+                                    browser.selected_coll_index = pos;
+                                }
+                                browser.view = BrowserView::CollectionList(db.clone());
+                            } else {
+                                // Graph row selected - show graph properties
+                                let graph_name = browser.graphs[graph_idx].name.clone();
+                                browser
+                                    .load_graph_details(
+                                        client,
+                                        endpoint,
+                                        &db,
+                                        &graph_name,
+                                        username,
+                                        password,
+                                    )
+                                    .await?;
+                                browser.view = BrowserView::GraphProperties(db.clone(), graph_name);
+                            }
+                        }
+                    }
+                    KeyCode::Char('v') | KeyCode::Char('V') => {
+                        // Navigate to first vertex collection in the edge definition
+                        if let Some((graph_idx, Some(edge_idx))) =
+                            browser.find_selected_graph_item()
+                        {
+                            let edge_def = &browser.graphs[graph_idx].edge_definitions[edge_idx];
+                            if let Some(first_from) = edge_def.from.first().cloned() {
+                                // Push current view to navigation stack
+                                browser
+                                    .navigation_stack
+                                    .push((browser.view.clone(), browser.selected_graph_index));
 
-                                                if let Ok(opts) = options {
-                                                    let batch_size =
-                                                        opts["batchSize"].as_u64().unwrap_or(1000)
-                                                            as usize;
-                                                    let stream =
-                                                        opts["stream"].as_bool().unwrap_or(true);
-                                                    let max_documents = opts["maxDocuments"]
-                                                        .as_u64()
-                                                        .unwrap_or(100000)
-                                                        as usize;
+                                // Load collections and find the vertex collection
+                                browser
+                                    .load_collections(client, endpoint, &db, username, password)
+                                    .await?;
+                                if let Some(pos) = browser
+                                    .collections
+                                    .iter()
+                                    .position(|c| c.info.name == first_from)
+                                {
+                                    browser.selected_coll_index = pos;
+                                }
+                                browser.view = BrowserView::CollectionList(db.clone());
+                            }
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if !browser.graphs.is_empty() {
+                            // Calculate total number of rows (graphs + edge definitions + spacing)
+                            let mut total_rows = 0;
+                            for graph in &browser.graphs {
+                                total_rows += 1; // graph name row
+                                total_rows += graph.edge_definitions.len(); // edge definition rows
+                            }
+                            total_rows += browser.graphs.len().saturating_sub(1); // spacing rows between graphs
 
-                                                    // Execute query (same logic as before)
-                                                    aql_state.is_fetching = true;
-                                                    aql_state.results.clear();
-                                                    aql_state.total_fetched = 0;
-                                                    aql_state.has_more = false;
-                                                    aql_state.cursor_id = None;
+                            if total_rows > 0 {
+                                browser.selected_graph_index =
+                                    (browser.selected_graph_index + 1) % total_rows;
+                            }
+                        }
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if !browser.graphs.is_empty() {
+                            // Calculate total number of rows
+                            let mut total_rows = 0;
+                            for graph in &browser.graphs {
+                                total_rows += 1; // graph name row
+                                total_rows += graph.edge_definitions.len(); // edge definition rows
+                            }
+                            total_rows += browser.graphs.len().saturating_sub(1); // spacing rows between graphs
 
-                                                    browser.view =
-                                                        BrowserView::AqlQueryResults(db.clone());
+                            if total_rows > 0 {
+                                browser.selected_graph_index = if browser.selected_graph_index == 0
+                                {
+                                    total_rows - 1
+                                } else {
+                                    browser.selected_graph_index - 1
+                                };
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                BrowserView::CollectionProperties(db, _coll) => match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        browser.view = BrowserView::CollectionList(db.clone());
+                        browser.collection_details = None;
+                        browser.scroll_offset = 0;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        browser.scroll_offset = browser.scroll_offset.saturating_add(1);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        browser.scroll_offset = browser.scroll_offset.saturating_sub(1);
+                    }
+                    KeyCode::PageDown => {
+                        browser.scroll_offset = browser.scroll_offset.saturating_add(10);
+                    }
+                    KeyCode::PageUp => {
+                        browser.scroll_offset = browser.scroll_offset.saturating_sub(10);
+                    }
+                    _ => {}
+                },
+                BrowserView::DocumentViewer(db, _coll) => match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        browser.view = BrowserView::CollectionList(db.clone());
+                        browser.documents.clear();
+                        browser.scroll_offset = 0;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        browser.scroll_offset = browser.scroll_offset.saturating_add(1);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        browser.scroll_offset = browser.scroll_offset.saturating_sub(1);
+                    }
+                    KeyCode::PageDown => {
+                        browser.scroll_offset = browser.scroll_offset.saturating_add(10);
+                    }
+                    KeyCode::PageUp => {
+                        browser.scroll_offset = browser.scroll_offset.saturating_sub(10);
+                    }
+                    _ => {}
+                },
+                BrowserView::GraphProperties(db, _graph) => match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        browser.view = BrowserView::GraphList(db.clone());
+                        browser.graph_details = None;
+                        browser.scroll_offset = 0;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        browser.scroll_offset = browser.scroll_offset.saturating_add(1);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        browser.scroll_offset = browser.scroll_offset.saturating_sub(1);
+                    }
+                    KeyCode::PageDown => {
+                        browser.scroll_offset = browser.scroll_offset.saturating_add(10);
+                    }
+                    KeyCode::PageUp => {
+                        browser.scroll_offset = browser.scroll_offset.saturating_sub(10);
+                    }
+                    _ => {}
+                },
+                BrowserView::AqlQueryInput(db) => {
+                    // Handle AQL input view keys
+                    use crossterm::event::KeyModifiers;
 
-                                                    // Start fetching
-                                                    match aql::execute_aql_query_with_params(
-                                                        client,
-                                                        endpoint,
-                                                        &db,
-                                                        &query_text,
-                                                        bind_vars.clone(),
-                                                        batch_size,
-                                                        stream,
-                                                        username,
+                    if let Some(aql_state) = &mut browser.aql_state {
+                        // Check for Ctrl+Enter first (before other key handling)
+                        if key.code == KeyCode::Enter
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            // Execute query
+                            if aql_state.parameters_valid && aql_state.options_valid {
+                                let query_text = aql_state.query_textarea.lines().join("\n");
+                                let params_text = aql_state.parameters_textarea.lines().join("\n");
+                                let options_text = aql_state.options_textarea.lines().join("\n");
+
+                                // Parse parameters
+                                let bind_vars = if params_text.trim() == "{}" {
+                                    None
+                                } else {
+                                    serde_json::from_str(&params_text).ok()
+                                };
+
+                                // Parse options
+                                let options: Result<serde_json::Value, _> =
+                                    serde_json::from_str(&options_text);
+
+                                if let Ok(opts) = options {
+                                    let batch_size =
+                                        opts["batchSize"].as_u64().unwrap_or(1000) as usize;
+                                    let stream = opts["stream"].as_bool().unwrap_or(true);
+                                    let max_documents =
+                                        opts["maxDocuments"].as_u64().unwrap_or(100000) as usize;
+
+                                    // Execute query
+                                    aql_state.is_fetching = true;
+                                    aql_state.results.clear();
+                                    aql_state.total_fetched = 0;
+                                    aql_state.has_more = false;
+                                    aql_state.cursor_id = None;
+
+                                    browser.view = BrowserView::AqlQueryResults(db.clone());
+
+                                    // Start fetching - first batch
+                                    match aql::execute_aql_query_with_params(
+                                        client,
+                                        endpoint,
+                                        &db,
+                                        &query_text,
+                                        bind_vars.clone(),
+                                        batch_size,
+                                        stream,
+                                        username,
+                                        password,
+                                    )
+                                    .await
+                                    {
+                                        Ok(response) => {
+                                            // Store initial results
+                                            let mut all_results = response.result;
+                                            let mut has_more = response.has_more;
+                                            let mut cursor_id = response.id;
+
+                                            // Continue fetching if there's more
+                                            while has_more && all_results.len() < max_documents {
+                                                if let Some(ref cursor) = cursor_id {
+                                                    match aql::fetch_cursor_next(
+                                                        client, endpoint, &db, cursor, username,
                                                         password,
                                                     )
                                                     .await
                                                     {
-                                                        Ok(response) => {
-                                                            let mut all_results = response.result;
-                                                            let mut has_more = response.has_more;
-                                                            let mut cursor_id = response.id;
+                                                        Ok(cursor_response) => {
+                                                            all_results
+                                                                .extend(cursor_response.result);
+                                                            has_more = cursor_response.has_more;
+                                                            cursor_id = cursor_response.id;
+                                                        }
+                                                        Err(_) => {
+                                                            break;
+                                                        }
+                                                    }
+                                                } else {
+                                                    break;
+                                                }
+                                            }
 
-                                                            while has_more
-                                                                && all_results.len() < max_documents
-                                                            {
-                                                                if let Some(ref cursor) = cursor_id
+                                            // Update state once with all results
+                                            if let Some(aql_state) = browser.aql_state.as_mut() {
+                                                aql_state.results = all_results;
+                                                aql_state.total_fetched = aql_state.results.len();
+                                                aql_state.has_more = has_more;
+                                                aql_state.cursor_id = cursor_id;
+                                                aql_state.is_fetching = false;
+                                            }
+                                        }
+                                        Err(_e) => {
+                                            // Query failed - go back to input
+                                            browser.view = BrowserView::AqlQueryInput(db.clone());
+                                            if let Some(aql_state) = &mut browser.aql_state {
+                                                aql_state.is_fetching = false;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // Handle other keys
+                            match key.code {
+                                KeyCode::Char('q') | KeyCode::Esc => {
+                                    // Return to collection list but keep AQL state
+                                    browser.view = BrowserView::CollectionList(db.clone());
+                                }
+                                KeyCode::Tab => {
+                                    // Switch between fields including Submit button
+                                    aql_state.active_field = match aql_state.active_field {
+                                        aql::AqlInputField::Query => aql::AqlInputField::Parameters,
+                                        aql::AqlInputField::Parameters => {
+                                            aql::AqlInputField::Options
+                                        }
+                                        aql::AqlInputField::Options => aql::AqlInputField::Submit,
+                                        aql::AqlInputField::Submit => aql::AqlInputField::Query,
+                                    };
+                                }
+                                KeyCode::Enter => {
+                                    // Check if we're on the Submit button
+                                    if matches!(aql_state.active_field, aql::AqlInputField::Submit)
+                                    {
+                                        // Execute query when Enter is pressed on Submit button
+                                        if aql_state.parameters_valid && aql_state.options_valid {
+                                            let query_text =
+                                                aql_state.query_textarea.lines().join("\n");
+                                            let params_text =
+                                                aql_state.parameters_textarea.lines().join("\n");
+                                            let options_text =
+                                                aql_state.options_textarea.lines().join("\n");
+
+                                            // Parse parameters
+                                            let bind_vars = if params_text.trim() == "{}" {
+                                                None
+                                            } else {
+                                                serde_json::from_str(&params_text).ok()
+                                            };
+
+                                            // Parse options
+                                            let options: Result<serde_json::Value, _> =
+                                                serde_json::from_str(&options_text);
+
+                                            if let Ok(opts) = options {
+                                                let batch_size =
+                                                    opts["batchSize"].as_u64().unwrap_or(1000)
+                                                        as usize;
+                                                let stream =
+                                                    opts["stream"].as_bool().unwrap_or(true);
+                                                let max_documents =
+                                                    opts["maxDocuments"].as_u64().unwrap_or(100000)
+                                                        as usize;
+
+                                                // Execute query (same logic as before)
+                                                aql_state.is_fetching = true;
+                                                aql_state.results.clear();
+                                                aql_state.total_fetched = 0;
+                                                aql_state.has_more = false;
+                                                aql_state.cursor_id = None;
+
+                                                browser.view =
+                                                    BrowserView::AqlQueryResults(db.clone());
+
+                                                // Start fetching
+                                                match aql::execute_aql_query_with_params(
+                                                    client,
+                                                    endpoint,
+                                                    &db,
+                                                    &query_text,
+                                                    bind_vars.clone(),
+                                                    batch_size,
+                                                    stream,
+                                                    username,
+                                                    password,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(response) => {
+                                                        let mut all_results = response.result;
+                                                        let mut has_more = response.has_more;
+                                                        let mut cursor_id = response.id;
+
+                                                        while has_more
+                                                            && all_results.len() < max_documents
+                                                        {
+                                                            if let Some(ref cursor) = cursor_id {
+                                                                match aql::fetch_cursor_next(
+                                                                    client, endpoint, &db, cursor,
+                                                                    username, password,
+                                                                )
+                                                                .await
                                                                 {
-                                                                    match aql::fetch_cursor_next(
-                                                                        client, endpoint, &db,
-                                                                        cursor, username, password,
-                                                                    )
-                                                                    .await
-                                                                    {
-                                                                        Ok(cursor_response) => {
-                                                                            all_results.extend(
-                                                                                cursor_response
-                                                                                    .result,
-                                                                            );
-                                                                            has_more =
-                                                                                cursor_response
-                                                                                    .has_more;
-                                                                            cursor_id =
-                                                                                cursor_response.id;
-                                                                        }
-                                                                        Err(_) => {
-                                                                            break;
-                                                                        }
+                                                                    Ok(cursor_response) => {
+                                                                        all_results.extend(
+                                                                            cursor_response.result,
+                                                                        );
+                                                                        has_more = cursor_response
+                                                                            .has_more;
+                                                                        cursor_id =
+                                                                            cursor_response.id;
                                                                     }
-                                                                } else {
-                                                                    break;
+                                                                    Err(_) => {
+                                                                        break;
+                                                                    }
                                                                 }
-                                                            }
-
-                                                            if let Some(aql_state) =
-                                                                browser.aql_state.as_mut()
-                                                            {
-                                                                aql_state.results = all_results;
-                                                                aql_state.total_fetched =
-                                                                    aql_state.results.len();
-                                                                aql_state.has_more = has_more;
-                                                                aql_state.cursor_id = cursor_id;
-                                                                aql_state.is_fetching = false;
+                                                            } else {
+                                                                break;
                                                             }
                                                         }
-                                                        Err(_e) => {
-                                                            browser.view =
-                                                                BrowserView::AqlQueryInput(
-                                                                    db.clone(),
-                                                                );
-                                                            if let Some(aql_state) =
-                                                                &mut browser.aql_state
-                                                            {
-                                                                aql_state.is_fetching = false;
-                                                            }
+
+                                                        if let Some(aql_state) =
+                                                            browser.aql_state.as_mut()
+                                                        {
+                                                            aql_state.results = all_results;
+                                                            aql_state.total_fetched =
+                                                                aql_state.results.len();
+                                                            aql_state.has_more = has_more;
+                                                            aql_state.cursor_id = cursor_id;
+                                                            aql_state.is_fetching = false;
+                                                        }
+                                                    }
+                                                    Err(_e) => {
+                                                        browser.view =
+                                                            BrowserView::AqlQueryInput(db.clone());
+                                                        if let Some(aql_state) =
+                                                            &mut browser.aql_state
+                                                        {
+                                                            aql_state.is_fetching = false;
                                                         }
                                                     }
                                                 }
                                             }
-                                        } else {
-                                            // Pass Enter to the active TextArea for newline
-                                            match aql_state.active_field {
-                                                aql::AqlInputField::Query => {
-                                                    aql_state.query_textarea.input(key);
-                                                }
-                                                aql::AqlInputField::Parameters => {
-                                                    aql_state.parameters_textarea.input(key);
-                                                    let text = aql_state
-                                                        .parameters_textarea
-                                                        .lines()
-                                                        .join("\n");
-                                                    aql_state.parameters_valid =
-                                                        serde_json::from_str::<serde_json::Value>(
-                                                            &text,
-                                                        )
-                                                        .is_ok();
-                                                }
-                                                aql::AqlInputField::Options => {
-                                                    aql_state.options_textarea.input(key);
-                                                    let text = aql_state
-                                                        .options_textarea
-                                                        .lines()
-                                                        .join("\n");
-                                                    aql_state.options_valid =
-                                                        serde_json::from_str::<serde_json::Value>(
-                                                            &text,
-                                                        )
-                                                        .is_ok();
-                                                }
-                                                aql::AqlInputField::Submit => {
-                                                    // No input on submit button
-                                                }
-                                            }
                                         }
-                                    }
-                                    _ => {
-                                        // Pass all other keys to the active TextArea
+                                    } else {
+                                        // Pass Enter to the active TextArea for newline
                                         match aql_state.active_field {
                                             aql::AqlInputField::Query => {
                                                 aql_state.query_textarea.input(key);
                                             }
                                             aql::AqlInputField::Parameters => {
                                                 aql_state.parameters_textarea.input(key);
-                                                // Validate JSON after input
                                                 let text = aql_state
                                                     .parameters_textarea
                                                     .lines()
@@ -1744,7 +1667,6 @@ pub async fn run_database_browser(
                                             }
                                             aql::AqlInputField::Options => {
                                                 aql_state.options_textarea.input(key);
-                                                // Validate JSON after input
                                                 let text =
                                                     aql_state.options_textarea.lines().join("\n");
                                                 aql_state.options_valid =
@@ -1759,50 +1681,76 @@ pub async fn run_database_browser(
                                         }
                                     }
                                 }
+                                _ => {
+                                    // Pass all other keys to the active TextArea
+                                    match aql_state.active_field {
+                                        aql::AqlInputField::Query => {
+                                            aql_state.query_textarea.input(key);
+                                        }
+                                        aql::AqlInputField::Parameters => {
+                                            aql_state.parameters_textarea.input(key);
+                                            // Validate JSON after input
+                                            let text =
+                                                aql_state.parameters_textarea.lines().join("\n");
+                                            aql_state.parameters_valid =
+                                                serde_json::from_str::<serde_json::Value>(&text)
+                                                    .is_ok();
+                                        }
+                                        aql::AqlInputField::Options => {
+                                            aql_state.options_textarea.input(key);
+                                            // Validate JSON after input
+                                            let text =
+                                                aql_state.options_textarea.lines().join("\n");
+                                            aql_state.options_valid =
+                                                serde_json::from_str::<serde_json::Value>(&text)
+                                                    .is_ok();
+                                        }
+                                        aql::AqlInputField::Submit => {
+                                            // No input on submit button
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
-                    BrowserView::AqlQueryResults(db) => {
-                        if let Some(aql_state) = &mut browser.aql_state {
-                            match key.code {
-                                KeyCode::Char('q') | KeyCode::Esc => {
-                                    browser.view = BrowserView::AqlQueryInput(db.clone());
-                                    aql_state.scroll_offset = 0;
-                                    aql_state.current_page = 0;
-                                }
-                                KeyCode::Down | KeyCode::Char('j') => {
-                                    aql_state.scroll_offset =
-                                        aql_state.scroll_offset.saturating_add(1);
-                                }
-                                KeyCode::Up | KeyCode::Char('k') => {
-                                    aql_state.scroll_offset =
-                                        aql_state.scroll_offset.saturating_sub(1);
-                                }
-                                KeyCode::PageDown => {
-                                    aql_state.scroll_offset =
-                                        aql_state.scroll_offset.saturating_add(10);
-                                }
-                                KeyCode::PageUp => {
-                                    aql_state.scroll_offset =
-                                        aql_state.scroll_offset.saturating_sub(10);
-                                }
-                                KeyCode::Left => {
-                                    if aql_state.current_page > 0 {
-                                        aql_state.current_page -= 1;
-                                        aql_state.scroll_offset = 0;
-                                    }
-                                }
-                                KeyCode::Right => {
-                                    let page_size = 100;
-                                    let total_pages =
-                                        (aql_state.results.len() + page_size - 1) / page_size;
-                                    if aql_state.current_page + 1 < total_pages {
-                                        aql_state.current_page += 1;
-                                        aql_state.scroll_offset = 0;
-                                    }
-                                }
-                                _ => {}
+                }
+                BrowserView::AqlQueryResults(db) => {
+                    if let Some(aql_state) = &mut browser.aql_state {
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => {
+                                browser.view = BrowserView::AqlQueryInput(db.clone());
+                                aql_state.scroll_offset = 0;
+                                aql_state.current_page = 0;
                             }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                aql_state.scroll_offset = aql_state.scroll_offset.saturating_add(1);
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                aql_state.scroll_offset = aql_state.scroll_offset.saturating_sub(1);
+                            }
+                            KeyCode::PageDown => {
+                                aql_state.scroll_offset =
+                                    aql_state.scroll_offset.saturating_add(10);
+                            }
+                            KeyCode::PageUp => {
+                                aql_state.scroll_offset =
+                                    aql_state.scroll_offset.saturating_sub(10);
+                            }
+                            KeyCode::Left => {
+                                if aql_state.current_page > 0 {
+                                    aql_state.current_page -= 1;
+                                    aql_state.scroll_offset = 0;
+                                }
+                            }
+                            KeyCode::Right => {
+                                let page_size = 100;
+                                let total_pages = aql_state.results.len().div_ceil(page_size);
+                                if aql_state.current_page + 1 < total_pages {
+                                    aql_state.current_page += 1;
+                                    aql_state.scroll_offset = 0;
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
